@@ -58,7 +58,7 @@ npm run build
 
 ## Native text editing
 
-See `docs/architecture/NATIVE-TEXT-EDITING.md` for the editing pipeline, font checks and supported PDF structures. Native replacement is conservative but now supports classic cross-reference tables, cross-reference streams (including FlateDecode with PNG predictors), compressed object streams, direct page content streams, and both WinAnsi simple fonts and supported Identity-H fonts with readable ToUnicode maps. Embedded subset fonts are limited to glyphs actually present in the subset. Unsupported or ambiguous text is rejected without adding an overlay. Paragraph reflow and text inside nested Form XObjects are not yet supported.
+Choose **Edit Text**, click any text on the page and type; Enter saves, Esc cancels. Edits rewrite the original PDF text operators in place — same font, size, colour and position, with no overlay or duplicate. Words after the edit on the same line move to fit, while other table cells and columns stay put. Letters missing from an embedded subset font are drawn with the same font installed on the computer (Chrome/Edge asks once for font access), then the closest match. See `docs/architecture/NATIVE-TEXT-EDITING.md` for the pipeline and current limitations.
 
 ## Testing
 
