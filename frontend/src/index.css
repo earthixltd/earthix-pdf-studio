@@ -1,0 +1,246 @@
+@import "tailwindcss";
+@import "./components/ui/ui.css";
+
+/*
+ * Earthix Design System
+ * Shared tokens for every page, panel and editor feature.
+ * Keep the breakpoint system limited to md and lg.
+ */
+@theme {
+  --color-brand-50: #f7f5ff;
+  --color-brand-100: #eee9ff;
+  --color-brand-200: #ddd4ff;
+  --color-brand-300: #c4b3ff;
+  --color-brand-400: #a48aff;
+  --color-brand-500: #805eeF;
+  --color-brand-600: #6335df;
+  --color-brand-700: #5128bd;
+  --color-brand-800: #43239a;
+  --color-brand-900: #351d76;
+
+  --color-neutral-0: #ffffff;
+  --color-neutral-50: #f8f9fc;
+  --color-neutral-100: #f1f3f8;
+  --color-neutral-200: #e7eaf1;
+  --color-neutral-300: #d6dbe6;
+  --color-neutral-400: #aab2c1;
+  --color-neutral-500: #7b8496;
+  --color-neutral-600: #626c80;
+  --color-neutral-700: #465064;
+  --color-neutral-800: #2d374a;
+  --color-neutral-900: #1b2435;
+
+  --color-success-50: #effaf5;
+  --color-success-600: #21845e;
+  --color-warning-50: #fff8e8;
+  --color-warning-600: #a86b12;
+  --color-danger-50: #fff2f3;
+  --color-danger-600: #c34558;
+  --color-info-50: #eff7ff;
+  --color-info-600: #2769a8;
+
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "DM Serif Display", Georgia, serif;
+  --font-brand: "Manrope", "DM Sans", ui-sans-serif, sans-serif;
+
+  --radius-control: 0.625rem;
+  --radius-panel: 0.875rem;
+  --radius-window: 1.125rem;
+
+  --breakpoint-*: initial;
+  --breakpoint-md: 48rem;
+  --breakpoint-lg: 64rem;
+}
+
+:root {
+  color-scheme: light;
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Semantic colors */
+  --color-text-primary: #202238;
+  --color-text-secondary: #555d72;
+  --color-text-muted: #858da0;
+  --color-surface: #ffffff;
+  --color-surface-subtle: #fbfbfe;
+  --color-workspace: #f3f5fa;
+  --color-border: #e6e9f1;
+  --color-border-strong: #d9deea;
+  --color-focus-ring: #9b83ed;
+
+  /* Shared spacing scale: 1 unit = 4px */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* Shape and motion */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.125rem;
+  --radius-full: 9999px;
+  --duration-fast: 140ms;
+  --duration-normal: 180ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Centralized container */
+  --container-max: 90rem;
+  --container-gutter: 1.5rem;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    min-width: 320px;
+    min-height: 100%;
+    scroll-behavior: smooth;
+    background: var(--color-workspace);
+  }
+
+  body {
+    min-width: 320px;
+    min-height: 100%;
+    margin: 0;
+    color: var(--color-text-primary);
+    background: var(--color-workspace);
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  input:disabled,
+  textarea:disabled,
+  select:disabled {
+    cursor: not-allowed;
+  }
+
+  img,
+  svg,
+  video,
+  canvas {
+    display: block;
+    max-width: 100%;
+  }
+
+  ::selection {
+    color: var(--color-brand-900);
+    background: var(--color-brand-100);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-focus-ring);
+    outline-offset: 2px;
+  }
+}
+
+/* Reusable semantic container for pages and standalone sections. */
+.container {
+  width: 100%;
+  max-width: var(--container-max);
+  margin-inline: auto;
+  padding-inline: var(--container-gutter);
+}
+
+/* Editorial display typography; keep utility/navigation text sans-serif. */
+.font-display,
+.page-title {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: -0.025em;
+}
+
+.page-title {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: clamp(2rem, 3vw, 2.75rem);
+  line-height: 1.08;
+  text-wrap: balance;
+}
+
+.section-title {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-family: var(--font-brand);
+  font-size: clamp(1.125rem, 1.6vw, 1.375rem);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.body-copy {
+  color: var(--color-text-secondary);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+}
+
+.caption-copy {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.surface-panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+
+.control-focus:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+@media (max-width: 47.999rem) {
+  :root {
+    --container-gutter: 1rem;
+  }
+}
+
+@media (min-width: 48rem) and (max-width: 63.999rem) {
+  :root {
+    --container-gutter: 1.5rem;
+  }
+}
+
+@media (min-width: 64rem) {
+  :root {
+    --container-gutter: 2rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

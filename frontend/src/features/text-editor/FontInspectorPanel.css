@@ -1,0 +1,35 @@
+.font-inspector { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--studio-border, #e8e6ef); border-radius: 12px; background: var(--studio-surface, #fff); color: var(--studio-text, #28253a); }
+.font-inspector-heading { display: flex; align-items: center; gap: 10px; color: var(--studio-brand, #6335df); }
+.font-inspector-heading > svg { flex: 0 0 auto; font-size: 16px; }
+.font-inspector-heading h3 { margin: 0; color: var(--studio-text, #28253a); font-size: 13px; font-weight: 700; }
+.font-inspector-heading small { display: block; margin-top: 2px; color: var(--studio-muted, #777386); font-size: 11px; }
+.font-inspector-font-summary { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 10px; border: 1px solid var(--studio-border, #e8e6ef); border-radius: 9px; background: var(--studio-soft, #faf9fd); }
+.font-inspector-font-summary.selected { border-color: var(--studio-brand, #805eef); background: var(--studio-brand-soft, #f7f5ff); }
+.font-inspector-font-icon { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; border-radius: 8px; background: #eee9ff; color: #6335df; }
+.font-inspector-font-copy { display: grid; min-width: 0; flex: 1; gap: 3px; }
+.font-inspector-font-copy strong { overflow: hidden; color: var(--studio-text, #28253a); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.font-inspector-font-copy small { overflow: hidden; color: var(--studio-muted, #777386); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.font-inspector-status { flex: 0 0 auto; padding: 3px 6px; border-radius: 20px; font-size: 9px; font-weight: 700; }
+.font-inspector-status.supported { background: #e7f7ee; color: #187448; }
+.font-inspector-status.unsupported { background: #fff3df; color: #9b5a0b; }
+.font-inspector-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.font-inspector-property { display: grid; min-width: 0; gap: 3px; }
+.font-inspector-property dt { color: var(--studio-muted, #777386); font-size: 10px; }
+.font-inspector-property dd { overflow: hidden; margin: 0; color: var(--studio-text, #28253a); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.font-inspector-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.font-inspector-section-title { padding-top: 7px; border-top: 1px solid var(--studio-border, #e8e6ef); color: var(--studio-text, #28253a); font-size: 11px; font-weight: 700; }
+.font-inspector-color-row { display: grid; grid-template-columns: 1fr auto 1fr auto; align-items: center; gap: 6px; color: var(--studio-muted, #777386); font-size: 10px; }
+.font-inspector-color-value { display: inline-flex; align-items: center; gap: 5px; color: var(--studio-text, #28253a); font-size: 10px; }
+.font-inspector-color-value i { width: 10px; height: 10px; border: 1px solid #0002; border-radius: 3px; }
+.font-inspector-compatibility { display: flex; align-items: flex-start; gap: 8px; padding: 9px; border-radius: 8px; }
+.font-inspector-compatibility > svg { flex: 0 0 auto; margin-top: 1px; }
+.font-inspector-compatibility div { display: grid; gap: 3px; }
+.font-inspector-compatibility strong { font-size: 10px; }
+.font-inspector-compatibility small { color: inherit; font-size: 10px; line-height: 1.45; opacity: .85; }
+.font-inspector-compatibility.is-supported { background: #eaf8f0; color: #176b43; }
+.font-inspector-compatibility.is-limited { background: #fff5e6; color: #895309; }
+.font-inspector-note { display: flex; align-items: flex-start; gap: 7px; color: var(--studio-muted, #777386); font-size: 10px; line-height: 1.5; }
+.font-inspector-note svg { flex: 0 0 auto; margin-top: 2px; }
+.font-inspector-empty { margin: 0; color: var(--studio-muted, #777386); font-size: 11px; line-height: 1.5; }
+.font-inspector-font-list { display: grid; gap: 8px; }
+@media (max-width: 767px) { .font-inspector { padding: 12px; } }

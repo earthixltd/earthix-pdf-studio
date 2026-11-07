@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+frontend/dist/
+backend/dist/
+coverage/
+
+# Local environment files
+.env
+.env.*.local
+frontend/.env.local
+frontend/.env.*.local
+backend/.env
+backend/.env.*.local
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# Local PDF test documents and exports
+*.pdf
+!tests/fixtures/**/*.pdf
+*.native-edited.pdf
+
+# Local caches
+.cache/
+.tmp/
+
+# PDF worker and WASM assets copied from installed npm packages
+frontend/public/pdfjs/
+frontend/public/pdfium/
+frontend/public/fonts/

@@ -1,0 +1,7 @@
+{
+  "name": "@earthix/backend-reserved",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Reserved for a future Node.js, Express and MongoDB backend. No backend dependencies are installed in Step 1."
+}
