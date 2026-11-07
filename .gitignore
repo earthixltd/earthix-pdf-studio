@@ -36,3 +36,4 @@ npm-debug.log*
 frontend/public/pdfjs/
 frontend/public/pdfium/
 frontend/public/fonts/
+frontend/public/image_decoders/

@@ -1,48 +1,59 @@
 # Earthix Native PDF Text Editing
 
-## What this phase adds
+Text is edited **inside the page content streams**. The original text-showing
+operators (`Tj`, `TJ`, `'`, `"`) are rewritten in place, so there is never an
+overlay or a duplicate copy of the text. Font, size, colour, rendering mode,
+character spacing, horizontal scaling and transforms are inherited from the
+original graphics state.
 
-- Native PDF text/font inspection for supported page content streams.
-- Font metadata including resource name, subtype, encoding, embedded/subset status, ToUnicode coverage, basic style flags and width metrics.
-- Per-text-run metadata including operator (`Tj` or `TJ`), point size, character/word spacing, horizontal scaling, text rise, rendering mode, position and supported device colour operators.
-- Replacement glyph compatibility checks before enabling the Replace action.
-- Deterministic PDF.js text-layer span matching. Exact matches are preferred; a unique partial match is accepted; ambiguous matches are rejected.
-- `ReplaceNativeTextRunCommand`, which applies a verified content-stream replacement as one Document Core history command with Undo/Redo.
-- A Font Inspector panel in the editor properties area.
+## User flow
 
-## Native replacement behavior
+1. Choose **Edit Text** in the toolbar. Every editable text block on the page gets a hover outline.
+2. Click text. An in-place editor opens exactly over it, using the same font family, size, weight, style and colour.
+   The original glyphs are masked with the sampled page background while typing, so only one copy is visible.
+3. Press **Enter** (or click elsewhere) to save, **Esc** to cancel. The PDF is rewritten, verified, re-rendered and
+   recorded as one Undo/Redo step. Locked blocks explain why they cannot be edited.
 
-The current editor path replaces the string operand of an existing page content-stream text-showing operator. For `Tj`, the replacement is written as a `TJ` array with a calculated final text adjustment so the original text advance is maintained. For `TJ`, the original operator is replaced with a new `TJ` array and a calculated final adjustment. The current font selection, text state, rendering mode, colour operators and text matrix surrounding the original operator are retained because the surrounding content stream is not rebuilt.
+## Engine layout
 
-After replacement, the edited bytes are parsed again and the selected page/content-stream position is checked. Failed verification rejects the command before Document Core commits the updated bytes. The editor then opens the new byte snapshot in the viewer. Undo restores the previous byte snapshot; Redo restores the verified replacement snapshot.
+| Module | Responsibility |
+| --- | --- |
+| `engine/pdf-parser/pdfSyntax.js` | Lossless PDF object parser/serializer (dicts, arrays, names, strings, refs). |
+| `engine/pdf-parser/pdfStreams.js` | Tolerant Flate, LZW, ASCIIHex, ASCII85, RunLength decoding and PNG/TIFF predictors. |
+| `engine/pdf-parser/pdfDocumentIndex.js` | Classic and stream xrefs, hybrid files, object streams, broken-xref reconstruction, page tree with inherited `Resources`. |
+| `engine/pdf-parser/incrementalWriter.js` | Appends incremental updates in the same xref style as the file (repaired files get a full xref stream). |
+| `engine/font-engine/pdfFontLoader.js` | Decodes Type0/Identity-H, TrueType, Type1, Type3 fonts: ToUnicode (token based), base encodings + `Differences`, glyph names, embedded-font cmaps, widths (incl. standard-14 AFM metrics). |
+| `engine/content-stream/contentStream.js` | Content-stream interpreter: `q/Q` graphics-state stack, `cm`, text state, colours, `Tf` via ExtGState, Form XObjects, inline images, painted rules (table borders). Produces runs with exact geometry in user space. |
+| `engine/content-stream/textBlocks.js` | Groups runs into editable blocks (same line, same style, word-sized gaps, not separated by a border). Overprinted duplicates (fake bold/shadow) become twins that are edited together. |
+| `engine/font-engine/fallbackFonts.js`, `fontEmbedder.js` | Missing-glyph fallback: same font from the computer (Local Font Access), then a similar installed font, then a standard PDF font. Installed fonts are subset with fontkit and embedded as Type0/Identity-H with ToUnicode. |
+| `services/nativePdfTextEditor.js` | `inspectNativePdfText`, `replaceNativeTextBlock` (and the compatible `replaceNativePdfText`). |
+| `features/text-editor/InlineTextEditor.jsx` | The in-place editor. |
 
-## Font compatibility checks
+## How an edit is written
 
-A replacement is enabled only when the selected font encoding can be mapped safely and every replacement character is supported by the font resource. Identity-H fonts require a readable ToUnicode CMap and a matching embedded glyph/CID. WinAnsi simple fonts use the Windows-1252 byte mapping plus the PDF /Widths table; embedded subset fonts are restricted to codes with an available width/glyph entry. Missing characters are rejected. Non-embedded simple fonts can be edited with an explicit font-substitution warning because the actual font program is not present in the PDF. No fallback font or duplicate overlay is silently inserted.
+* A prefix/suffix diff keeps the original glyph codes and kerning of unchanged characters; only the changed middle is re-encoded.
+* When every new character exists in the PDF font, the original font is reused (`Tj` → `TJ` with explicit glyph codes).
+  Word spaces that the PDF drew by positioning (large negative `TJ` numbers) are recreated the same way.
+* When a character is missing from an embedded subset font, the whole block is drawn with the fallback font
+  (`/EFn size Tf … TJ /Original size Tf`) so the block stays visually consistent.
+* The rewritten operator keeps its original pen advance; text that followed it on the same line is moved by exactly the
+  width difference. Movement stops at large gaps and at painted vertical rules, so other table cells and columns never
+  move. If the new text overflows a cell/column or the paragraph's right margin, a warning is shown.
+* The edited bytes are parsed again and the line is verified to read the new text before the edit is committed.
 
-Font metadata is diagnostic. PDF color spaces and text state are broader than the currently inspected device operators; the inspector currently reports DeviceGray, DeviceRGB and DeviceCMYK values when visible in the content stream. Complex graphics-state inheritance, patterns, ICCBased colors and nested Form XObjects are not comprehensively resolved by this inspector.
+## Known limitations
 
-## Current parser limitations
+* No paragraph re-wrap: a longer line is not wrapped onto the next line.
+* Underlines, highlights and links do not move with shifted text.
+* Hindi and other complex scripts (Indic, Arabic, Hebrew, Thai) are locked: PDFs store them as shaped glyphs whose order
+  differs from Unicode order, so they cannot be edited safely yet.
+* Encrypted PDFs must be decrypted first. Vertical (Identity-V) text and fonts without any Unicode information are locked.
+* Exact-font fallback needs Chrome or Edge with font access allowed for the site; otherwise a standard PDF font
+  (Helvetica/Times/Courier, metric-compatible with Arial/Times New Roman/Courier New) is used and the user is told.
 
-The custom native text editor is intentionally conservative. It currently supports:
+## Tests
 
-- Classic PDF cross-reference tables and cross-reference streams, including `/W`, `/Index`, `/Prev`, `/XRefStm`, FlateDecode, and PNG predictor rows 10–15. Compressed objects referenced by type-2 xref entries are read from `/ObjStm` streams using `/N` and `/First`.
-- Page `/Contents` streams referenced directly or through a simple array.
-- Direct stream `/Length` values.
-- Unfiltered or `/FlateDecode` content streams.
-- Font resource dictionaries that are directly available from the page resource dictionary.
-- Type 0 / Identity-H font text runs with a readable ToUnicode CMap and supported replacement glyphs.
-- Simple WinAnsi font text runs using Windows-1252 byte mapping and the PDF `/Widths` table for conservative subset-glyph checks.
-- Existing text-showing operators `Tj` and `TJ`.
-
-It does not yet support arbitrary encodings beyond the currently implemented WinAnsi and Identity-H paths, text inside nested Form XObjects, inherited resource dictionaries throughout every page-tree shape, indirect stream lengths, encrypted-document native replacement, arbitrary stream filter chains, vertical writing modes, marked-content text replacement, complex clipping/soft masks, or every possible font program format. The parser's text-state and colour inspector is not a complete PDF graphics-state interpreter.
-
-This phase does not implement paragraph reflow. A replacement is kept at the original text object's position and advance; it does not automatically push neighboring content or re-layout a paragraph. If replacement glyphs are not present in the embedded subset font, the operation is rejected rather than silently substituting another font.
-
-## Test coverage
-
-The Node regression suite covers font capability assessment, exact/partial/ambiguous click matching, native replacement command history, export verification, viewer search and engine lifecycle, plus xref-stream parsing, PNG predictor decoding, compressed object streams, WinAnsi mapping and incremental replacement output. In addition, the user-provided two-page IRCTC sample PDF was tested locally without being added to the repository: an existing `Tj` passenger-name run and a long `TJ` paragraph run were replaced; the old strings were absent after replacement; new strings remained extractable; Undo/Redo restored the expected content; and the exported file reopened as a two-page PDF. The source PDF is private test input and is not included in this project archive.
-
-## Uploaded 21-page PDF regression
-
-The user-provided `What-is-a-computer-Network(1).pdf` uses PDF 1.5 cross-reference streams and compressed object streams. The editor now parses it and detects 1,558 native text runs across 21 pages. Regression replacements were made in a WinAnsi simple-font Tj run and a subset-font TJ run. The output reopened as a 21-page PDF, retained its unencrypted state, and `pdftotext` confirmed the original strings were replaced by “What is a computer Network!” and “Basic Networking Tutorials”. The original file is not bundled in the project archive.
+`tests/font-engine/nativeTextBlockEditing.test.js` builds PDFs with pdf-lib (standard and subset TrueType fonts) and
+hand-written content streams, then checks geometry, colour/size retention, same-line shifting, table cells, TJ word
+spaces, `q/cm/Q`, overprinted duplicates, inherited resources, classic/stream xref output, subset fallback with an
+installed font, repeated edits, and PDF.js text extraction of every result.

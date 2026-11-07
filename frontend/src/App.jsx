@@ -1,90 +1,83 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { PDFDocument } from 'pdf-lib'
 import {
-  FaCheck,
-  FaChevronDown,
-  FaChevronLeft,
-  FaChevronRight,
-  FaCompress,
-  FaDownload,
-  FaEdit,
-  FaEllipsisH,
-  FaExpand,
-  FaFileAlt,
-  FaFilePdf,
-  FaHome,
-  FaInfoCircle,
-  FaList,
-  FaLock,
-  FaMinus,
-  FaPlus,
-  FaRedo,
-  FaSearch,
-  FaSlidersH,
-  FaSpinner,
-  FaTextHeight,
-  FaTimes,
-  FaTools,
-  FaUndo,
-  FaUpload,
-  FaExchangeAlt,
+  FaBars, FaCheckCircle, FaChevronDown, FaChevronLeft, FaChevronRight, FaColumns, FaCompress, FaDownload, FaEdit,
+  FaExclamationCircle, FaExclamationTriangle, FaExpand, FaFileAlt, FaFilePdf, FaHome, FaLayerGroup, FaList, FaMinus,
+  FaMoon, FaPlus, FaPrint, FaRedo, FaSearch, FaSlidersH, FaSpinner, FaSun, FaTh, FaTimes, FaTools, FaUndo, FaUpload,
 } from 'react-icons/fa'
 import { createPdfEngine } from './engine/index.js'
 import {
-  createDocumentCore,
-  IndexedDbCheckpointStorage,
-  ReplacePdfBytesCommand,
-  ReplaceNativeTextRunCommand,
+  createDocumentCore, IndexedDbCheckpointStorage, ReplacePdfBytesCommand, ReplaceNativeTextBlockCommand,
+  SetPageObjectsCommand, TransformPdfBytesCommand,
 } from './engine/document-core/index.js'
 import { PdfPageThumbnail } from './features/pdf-viewer/PdfPageThumbnail.jsx'
 import { PdfPageViewer } from './features/pdf-viewer/PdfPageViewer.jsx'
 import { searchPdfDocument } from './features/pdf-viewer/searchPdfDocument.js'
-import { inspectNativePdfText } from './services/nativePdfTextEditor.js'
-import { assessFontReplacement } from './engine/font-engine/fontCapabilities.js'
-import { FontInspectorPanel } from './features/text-editor/FontInspectorPanel.jsx'
-import { findNativeRunForText } from './features/text-editor/findNativeRunForText.js'
+import { editPageImage, inspectNativePdfText, restyleNativeTextBlock } from './services/nativePdfTextEditor.js'
+import { createLocalFontProvider } from './engine/font-engine/fallbackFonts.js'
+import { findBlockNearPoint } from './features/text-editor/blockGeometry.js'
 import { HomeWorkspace, SplitWorkspace, OrganizeWorkspace } from './features/page-manager/WorkspacePanels.jsx'
 import { createPagePlan, movePage as movePageInPlan, rotatePage as rotatePageInPlan, removePage as removePageFromPlan, addBlankPage, isPagePlanChanged } from './features/page-manager/pagePlan.js'
 import { applyPagePlanToPdf } from './features/page-manager/applyPagePlan.js'
+import { writePageObjects } from './engine/page-objects/objectWriter.js'
+import { extractPageObjects } from './engine/page-objects/objectReader.js'
+import { isStandardFamily } from './engine/page-objects/textLayout.js'
+import { TOOLS, TOOL_BY_ID } from './features/editor/editorTools.js'
+import { ObjectLayer } from './features/editor/ObjectLayer.jsx'
+import { PageImageLayer } from './features/editor/PageImageLayer.jsx'
+import { PropertiesPanel } from './features/editor/PropertiesPanel.jsx'
+import { SignatureDialog } from './features/editor/SignatureDialog.jsx'
+import { DEFAULT_TOOL_SETTINGS, inkBounds, moveObject, newId, objectLabel } from './features/editor/objectFactory.js'
+import { fitTextObject, setMeasureFontProvider, subscribeFontLoads } from './features/editor/textMeasure.js'
+import { importImageFile } from './features/editor/imageImport.js'
 import './studio.css'
+import './features/editor/editor.css'
 
-const sidebarGroups = [{
-  label: 'WORKSPACE',
-  items: [
-    { id: 'home', label: 'Home', icon: FaHome },
-    { id: 'edit', label: 'Edit PDF', icon: FaEdit },
-    { id: 'merge', label: 'Merge PDF', icon: FaFileAlt },
-    { id: 'split', label: 'Split PDF', icon: FaList },
-    { id: 'organize', label: 'Organize Pages', icon: FaSlidersH },
-    { id: 'compress', label: 'Optimize PDF', icon: FaCompress },
-  ],
-}]
-
-const viewerTools = [
-  { id: 'select', label: 'Select text', icon: FaTextHeight, hint: 'Select and copy text in the PDF' },
-  { id: 'text-edit', label: 'Edit Text', icon: FaEdit, hint: 'Find and replace supported original PDF text' },
+const NAV_ITEMS = [
+  { id: 'home', label: 'Home', icon: FaHome },
+  { id: 'edit', label: 'Edit', icon: FaEdit },
+  { id: 'merge', label: 'Merge', icon: FaFileAlt },
+  { id: 'split', label: 'Split', icon: FaColumns },
+  { id: 'organize', label: 'Pages', icon: FaTh },
+  { id: 'compress', label: 'Optimize', icon: FaCompress },
 ]
+const ONE_SHOT_TOOLS = new Set(['text', 'shape', 'note', 'signature', 'image', 'whiteout'])
+const SETTINGS_KEY = 'earthix.toolSettings.v1'
+const THEME_KEY = 'earthix.theme'
 
-function Brand() {
-  return (
-    <div className="brand-lockup">
-      <div className="brand-mark"><span>E</span></div>
-      <div className="brand-name"><strong>earthix</strong><small>PDF STUDIO</small></div>
-    </div>
-  )
+function useMediaQuery(query) {
+  const [matches, setMatches] = useState(() => (typeof window !== 'undefined' ? window.matchMedia(query).matches : false))
+  useEffect(() => {
+    const media = window.matchMedia(query)
+    const update = () => setMatches(media.matches)
+    update()
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [query])
+  return matches
+}
+
+function readStoredSettings() {
+  try {
+    const stored = JSON.parse(globalThis.localStorage?.getItem(SETTINGS_KEY) || 'null')
+    if (!stored) return DEFAULT_TOOL_SETTINGS
+    return Object.fromEntries(Object.entries(DEFAULT_TOOL_SETTINGS).map(([key, value]) => [key, { ...value, ...(stored[key] || {}) }]))
+  } catch {
+    return DEFAULT_TOOL_SETTINGS
+  }
 }
 
 function Toast({ message, type, onClose }) {
   useEffect(() => {
     if (!message) return undefined
-    const timer = window.setTimeout(onClose, 4200)
+    const timer = window.setTimeout(onClose, type === 'error' || type === 'warning' ? 7000 : 4200)
     return () => window.clearTimeout(timer)
-  }, [message, onClose])
-
+  }, [message, type, onClose])
   if (!message) return null
+  const Icon = type === 'error' ? FaExclamationCircle : type === 'warning' ? FaExclamationTriangle : FaCheckCircle
   return (
-    <div className={`studio-toast ${type || ''}`} role="status">
-      <FaCheck />
+    <div className={`toast ${type || ''}`} role="status">
+      <Icon />
       <span>{message}</span>
       <button type="button" onClick={onClose} aria-label="Close notification"><FaTimes /></button>
     </div>
@@ -99,11 +92,7 @@ function formatBytes(bytes) {
 }
 
 function createPages(session) {
-  return Array.from({ length: session.pageCount }, (_, index) => ({
-    id: `${index}-${session.pageCount}`,
-    index,
-    pageNumber: index + 1,
-  }))
+  return Array.from({ length: session.pageCount }, (_, index) => ({ id: `${index}-${session.pageCount}`, index, pageNumber: index + 1 }))
 }
 
 function downloadPdf(bytes, fileName) {
@@ -115,7 +104,7 @@ function downloadPdf(bytes, fileName) {
   document.body.appendChild(link)
   link.click()
   link.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1200)
+  window.setTimeout(() => URL.revokeObjectURL(url), 1500)
 }
 
 async function openWithPassword(engine, bytes, fileName, onProgress) {
@@ -126,31 +115,60 @@ async function openWithPassword(engine, bytes, fileName, onProgress) {
     } catch (error) {
       if (error?.code !== 'PASSWORD_REQUIRED') throw error
       const enteredPassword = window.prompt(`Enter the password for ${fileName}`)
-      if (enteredPassword === null) throw new Error('PDF opening was cancelled because no password was provided.')
+      if (enteredPassword === null) throw new Error('PDF opening was cancelled because no password was provided.', { cause: error })
       password = enteredPassword
     }
   }
   throw new Error('The PDF password was not accepted after three attempts.')
 }
 
+async function splitEditableObjects(bytes) {
+  try {
+    return await extractPageObjects(bytes)
+  } catch {
+    return { bytes, objects: [], found: false }
+  }
+}
+
+const sameBytes = (a, b) => {
+  if (!a || !b || a.length !== b.length) return false
+  for (let index = 0; index < a.length; index += 1) if (a[index] !== b[index]) return false
+  return true
+}
+
 function App() {
   const fileInputRef = useRef(null)
   const mergeInputRef = useRef(null)
+  const imageInputRef = useRef(null)
+  const imageTargetRef = useRef(null)
   const engineRef = useRef(null)
   const documentSessionRef = useRef(null)
   const documentCoreRef = useRef(null)
   const documentCoreUnsubscribeRef = useRef(null)
   const originalPdfBytesRef = useRef(null)
   const openSequenceRef = useRef(0)
+  const fontProviderRef = useRef(null)
+  if (!fontProviderRef.current) {
+    fontProviderRef.current = createLocalFontProvider()
+    setMeasureFontProvider(fontProviderRef.current)
+  }
+  const pendingActivationRef = useRef(null)
+  const drawSessionRef = useRef(null)
+  const clipboardRef = useRef(null)
+  const signaturePointRef = useRef(null)
+
+  const isMobile = useMediaQuery('(max-width: 767px)')
+  const isCompact = useMediaQuery('(max-width: 1023px)')
 
   const [documentSession, setDocumentSession] = useState(null)
   const [documentCoreState, setDocumentCoreState] = useState(null)
   const [engineError, setEngineError] = useState('')
   const [engineStatus, setEngineStatus] = useState('idle')
-  const [fileName, setFileName] = useState('No document opened')
+  const [fileName, setFileName] = useState('No document open')
   const [fileSize, setFileSize] = useState(0)
   const [pages, setPages] = useState([])
   const [currentPage, setCurrentPage] = useState(0)
+  const [pageInput, setPageInput] = useState('1')
   const [zoom, setZoom] = useState(1)
   const [zoomMode, setZoomMode] = useState('width')
   const [processing, setProcessing] = useState(false)
@@ -160,55 +178,87 @@ function App() {
   const [toast, setToast] = useState({ message: '', type: '' })
   const [nativeRuns, setNativeRuns] = useState([])
   const [fontInspection, setFontInspection] = useState([])
-  const [nativeEditorOpen, setNativeEditorOpen] = useState(true)
   const [nativeSearchTerm, setNativeSearchTerm] = useState('')
   const [pdfSearchResults, setPdfSearchResults] = useState([])
   const [pdfSearchBusy, setPdfSearchBusy] = useState(false)
-  const [nativeSelectedRunKey, setNativeSelectedRunKey] = useState('')
-  const [nativeReplacementText, setNativeReplacementText] = useState('')
-  const [nativeEditError, setNativeEditError] = useState('')
-  const [nativeEditBusy, setNativeEditBusy] = useState(false)
-  const [hasNativeEdits, setHasNativeEdits] = useState(false)
-  const [selectedViewerText, setSelectedViewerText] = useState('')
-  const [showPages, setShowPages] = useState(true)
-  const [showInspector, setShowInspector] = useState(true)
-  const [showMore, setShowMore] = useState(false)
+  const [nativeBlocks, setNativeBlocks] = useState([])
+  const [pageImages, setPageImages] = useState([])
+  const [activeBlock, setActiveBlock] = useState(null)
+  const [activeClickPoint, setActiveClickPoint] = useState(null)
+  const [selectedBlockKey, setSelectedBlockKey] = useState(null)
+  const [selectedImageKey, setSelectedImageKey] = useState(null)
+  const [editorDraft, setEditorDraft] = useState('')
+  const [pdfBusy, setPdfBusy] = useState(false)
   const [recentFiles, setRecentFiles] = useState([])
   const [activeWorkspace, setActiveWorkspace] = useState('edit')
   const [splitFrom, setSplitFrom] = useState('1')
   const [splitTo, setSplitTo] = useState('1')
   const [pagePlan, setPagePlan] = useState([])
 
-  const toastMessage = toast.message
+  const [objects, setObjects] = useState([])
+  const [previewObject, setPreviewObject] = useState(null)
+  const [tool, setToolState] = useState('select')
+  const [toolSettings, setToolSettings] = useState(readStoredSettings)
+  const [selectedObjectId, setSelectedObjectId] = useState(null)
+  const [editingText, setEditingText] = useState(null)
+  const [leftTab, setLeftTab] = useState('pages')
+  const [showLeft, setShowLeft] = useState(() => typeof window === 'undefined' || window.innerWidth >= 1024)
+  const [showRight, setShowRight] = useState(() => typeof window === 'undefined' || window.innerWidth >= 1024)
+  const [navOpen, setNavOpen] = useState(false)
+  const [exportMenu, setExportMenu] = useState(false)
+  const [signatureOpen, setSignatureOpen] = useState(false)
+  const [hintTool, setHintTool] = useState(null)
+  const [localFamilies, setLocalFamilies] = useState([])
+  const [localFontStatus, setLocalFontStatus] = useState(fontProviderRef.current.status)
+  const [theme, setTheme] = useState(() => globalThis.localStorage?.getItem(THEME_KEY) || 'system')
+  const [fontVersion, bumpFontVersion] = useReducer((value) => value + 1, 0)
+
   const showToast = useCallback((message, type = '') => setToast({ message, type }), [])
   const closeToast = useCallback(() => setToast({ message: '', type: '' }), [])
+
+  useEffect(() => subscribeFontLoads(bumpFontVersion), [])
+  useEffect(() => {
+    try { globalThis.localStorage?.setItem(SETTINGS_KEY, JSON.stringify(toolSettings)) } catch { /* storage unavailable */ }
+  }, [toolSettings])
+  useEffect(() => {
+    const root = document.documentElement
+    if (theme === 'system') root.removeAttribute('data-theme')
+    else root.setAttribute('data-theme', theme)
+    try { globalThis.localStorage?.setItem(THEME_KEY, theme) } catch { /* storage unavailable */ }
+  }, [theme])
+  const prefersDark = useMediaQuery('(prefers-color-scheme: dark)')
+  const effectiveTheme = theme === 'system' ? (prefersDark ? 'dark' : 'light') : theme
+  const toggleTheme = () => setTheme(effectiveTheme === 'dark' ? 'light' : 'dark')
+
+  // Panels are drawers on small screens: start closed there.
+  useEffect(() => {
+    if (isCompact) { setShowLeft(false); setShowRight(false) } else { setShowLeft(true); setShowRight(true) }
+  }, [isCompact])
+
   const installDocumentCore = useCallback((nextCore) => {
     const previousCore = documentCoreRef.current
     documentCoreUnsubscribeRef.current?.()
     documentCoreUnsubscribeRef.current = null
     documentCoreRef.current = nextCore
     if (nextCore) {
-      documentCoreUnsubscribeRef.current = nextCore.subscribe((snapshot) => {
+      documentCoreUnsubscribeRef.current = nextCore.subscribe((snapshot, event) => {
         setDocumentCoreState(snapshot)
-        setHasNativeEdits(snapshot.isDirty)
+        if (event?.type !== 'autosave') setObjects(nextCore.objects.list())
       })
     } else {
       setDocumentCoreState(null)
-      setHasNativeEdits(false)
+      setObjects([])
     }
-    if (previousCore && previousCore !== nextCore) {
-      void previousCore.close({ flushAutosave: true }).catch(() => undefined)
-    }
+    if (previousCore && previousCore !== nextCore) void previousCore.close({ flushAutosave: true }).catch(() => undefined)
   }, [])
-  const nativeSelectedRun = nativeRuns.find((run) => run.key === nativeSelectedRunKey) || null
-  const nativeReplacementCompatibility = useMemo(() => (
-    nativeSelectedRun ? assessFontReplacement(nativeSelectedRun.fontMetadata, nativeReplacementText) : null
-  ), [nativeSelectedRun, nativeReplacementText])
-  const filteredNativeRuns = useMemo(() => {
-    const term = nativeSearchTerm.trim().toLocaleLowerCase()
-    if (!term) return nativeRuns.slice(0, 60)
-    return nativeRuns.filter((run) => run.originalText.toLocaleLowerCase().includes(term)).slice(0, 100)
-  }, [nativeRuns, nativeSearchTerm])
+
+  const applyInspection = useCallback((inspection) => {
+    setNativeRuns(inspection?.runs || [])
+    setNativeBlocks(inspection?.blocks || [])
+    setPageImages(inspection?.images || [])
+    setFontInspection(inspection?.fonts || [])
+  }, [])
+
   const pageCount = pages.length
   const pagePlanChanged = useMemo(() => isPagePlanChanged(pagePlan, pageCount), [pagePlan, pageCount])
 
@@ -219,14 +269,12 @@ function App() {
       setSplitTo(String(documentSession.pageCount))
     } else {
       setPagePlan([])
-      setSplitFrom('1')
-      setSplitTo('1')
     }
   }, [documentSession])
+  useEffect(() => { setPageInput(String(currentPage + 1)) }, [currentPage])
+
   const currentSearchItemIndexes = useMemo(() => (
-    [...new Set(pdfSearchResults
-      .filter((result) => result.pageIndex === currentPage)
-      .flatMap((result) => result.itemIndexes || []))]
+    [...new Set(pdfSearchResults.filter((result) => result.pageIndex === currentPage).flatMap((result) => result.itemIndexes || []))]
   ), [pdfSearchResults, currentPage])
 
   useEffect(() => {
@@ -236,10 +284,8 @@ function App() {
       setPdfSearchBusy(false)
       return undefined
     }
-
     let cancelled = false
     const controller = new AbortController()
-    setPdfSearchResults([])
     setPdfSearchBusy(true)
     const timer = window.setTimeout(async () => {
       try {
@@ -254,7 +300,6 @@ function App() {
         if (!cancelled) setPdfSearchBusy(false)
       }
     }, 220)
-
     return () => {
       cancelled = true
       window.clearTimeout(timer)
@@ -265,7 +310,6 @@ function App() {
   useEffect(() => {
     const engine = createPdfEngine()
     engineRef.current = engine
-    setEngineError('')
     return () => {
       const session = documentSessionRef.current
       const core = documentCoreRef.current
@@ -273,7 +317,6 @@ function App() {
       documentCoreRef.current = null
       documentCoreUnsubscribeRef.current?.()
       documentCoreUnsubscribeRef.current = null
-      setDocumentSession(null)
       void core?.close({ flushAutosave: true })
       void session?.close?.()
       void engine.dispose()
@@ -283,10 +326,7 @@ function App() {
 
   const replaceDocumentSession = useCallback(async (bytes, nextFileName, onProgress) => {
     if (!engineRef.current) throw new Error('The PDF engine is not ready. Refresh the page and try again.')
-    const nextSession = await engineRef.current.openDocument(bytes, {
-      fileName: nextFileName,
-      onProgress,
-    })
+    const nextSession = await engineRef.current.openDocument(bytes, { fileName: nextFileName, onProgress })
     const previousSession = documentSessionRef.current
     documentSessionRef.current = nextSession
     setDocumentSession(nextSession)
@@ -299,77 +339,65 @@ function App() {
     return nextSession
   }, [])
 
-  const commitPdfBytes = useCallback(async (bytes, nextFileName, nextPage = 0) => {
+  const clearSelections = useCallback(() => {
+    setSelectedObjectId(null)
+    setSelectedImageKey(null)
+    setSelectedBlockKey(null)
+    setActiveBlock(null)
+    setEditingText(null)
+    setPreviewObject(null)
+  }, [])
+
+  /** Replace the whole document (merge, page changes); Earthix items in the file become editable again. */
+  const commitPdfBytes = useCallback(async (fullBytes, nextFileName, nextPage = 0) => {
+    const { bytes, objects: extracted } = await splitEditableObjects(fullBytes)
     originalPdfBytesRef.current = bytes.slice()
     const nextSession = await replaceDocumentSession(bytes, nextFileName)
     const documentCore = documentCoreRef.current
     if (documentCore) {
-      await documentCore.execute(new ReplacePdfBytesCommand(bytes, {
-        fileName: nextFileName,
-        pageCount: nextSession.pageCount,
-        label: 'Replace document content',
-      }))
+      await documentCore.execute(new ReplacePdfBytesCommand(bytes, { fileName: nextFileName, pageCount: nextSession.pageCount, label: 'Replace document content', objects: extracted }))
     } else {
-      installDocumentCore(createDocumentCore({
-        fileName: nextFileName,
-        bytes,
-        pageCount: nextSession.pageCount,
-        checkpointStorage: new IndexedDbCheckpointStorage(),
-        autosave: true,
-      }))
+      const core = createDocumentCore({ fileName: nextFileName, bytes, pageCount: nextSession.pageCount, checkpointStorage: new IndexedDbCheckpointStorage(), autosave: true })
+      core.objects.restore(extracted, nextSession.pageCount)
+      installDocumentCore(core)
+      setObjects(core.objects.list())
     }
     setFileName(nextFileName)
-    setFileSize(bytes.byteLength)
-    setCurrentPage(Math.max(0, Math.min(nextPage, nextSession.pageCount - 1)))
-    documentCoreRef.current?.setActivePage(Math.max(0, Math.min(nextPage, nextSession.pageCount - 1)))
-    const inspection = await inspectNativePdfText(bytes).catch(() => ({ runs: [], fonts: [] }))
-    setNativeRuns(inspection.runs || [])
-    setFontInspection(inspection.fonts || [])
-    setNativeSelectedRunKey('')
-    setNativeReplacementText('')
-    setNativeEditError('')
+    setFileSize(fullBytes.byteLength)
+    const page = Math.max(0, Math.min(nextPage, nextSession.pageCount - 1))
+    setCurrentPage(page)
+    documentCoreRef.current?.setActivePage(page)
+    applyInspection(await inspectNativePdfText(bytes).catch(() => ({ runs: [], fonts: [] })))
+    clearSelections()
     return nextSession
-  }, [installDocumentCore, replaceDocumentSession])
+  }, [applyInspection, clearSelections, installDocumentCore, replaceDocumentSession])
 
   const openPdf = useCallback(async (file) => {
     if (!file) return
     const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
-    if (!isPdf) {
-      showToast('Please choose a valid PDF document.', 'error')
-      return
-    }
-    if (!engineRef.current) {
-      showToast('PDF engine is still initializing. Please try again.', 'error')
-      return
-    }
-
+    if (!isPdf) { showToast('Please choose a PDF document.', 'error'); return }
+    if (!engineRef.current) { showToast('The PDF engine is still starting. Try again in a moment.', 'error'); return }
     const operationId = ++openSequenceRef.current
     setProcessing(true)
     setProcessingProgress(0)
     setEngineError('')
     try {
-      const bytes = new Uint8Array(await file.arrayBuffer())
+      const fileBytes = new Uint8Array(await file.arrayBuffer())
+      const { bytes, objects: extracted, found } = await splitEditableObjects(fileBytes)
       if (operationId !== openSequenceRef.current) return
       const inspectionPromise = inspectNativePdfText(bytes).catch((error) => ({ runs: [], error }))
       const nextSession = await openWithPassword(engineRef.current, bytes, file.name, ({ loaded, total }) => {
         if (operationId !== openSequenceRef.current) return
         if (Number.isFinite(total) && total > 0) setProcessingProgress(Math.min(100, Math.round((loaded / total) * 100)))
       })
-      if (operationId !== openSequenceRef.current) {
-        await nextSession.close()
-        return
-      }
-
+      if (operationId !== openSequenceRef.current) { await nextSession.close(); return }
       const previousSession = documentSessionRef.current
       documentSessionRef.current = nextSession
       originalPdfBytesRef.current = bytes.slice()
-      installDocumentCore(createDocumentCore({
-        fileName: file.name,
-        bytes,
-        pageCount: nextSession.pageCount,
-        checkpointStorage: new IndexedDbCheckpointStorage(),
-        autosave: true,
-      }))
+      const core = createDocumentCore({ fileName: file.name, bytes, pageCount: nextSession.pageCount, checkpointStorage: new IndexedDbCheckpointStorage(), autosave: true })
+      core.objects.restore(extracted, nextSession.pageCount)
+      installDocumentCore(core)
+      setObjects(core.objects.list())
       setDocumentSession(nextSession)
       setPages(createPages(nextSession))
       setCurrentPage(0)
@@ -378,22 +406,13 @@ function App() {
       setFileName(file.name)
       setFileSize(file.size)
       setEngineStatus(nextSession.engineStatus)
-      setHasNativeEdits(false)
-      setNativeEditorOpen(true)
       setActiveWorkspace('edit')
       setNativeSearchTerm('')
       setPdfSearchResults([])
-      setNativeSelectedRunKey('')
-      setNativeReplacementText('')
-      setSelectedViewerText('')
+      clearSelections()
+      setToolState('select')
       const inspection = await inspectionPromise
-      setNativeRuns(inspection.runs || [])
-      setFontInspection(inspection.fonts || [])
-      setNativeEditError(inspection.error
-        ? `Native text search is unavailable for this PDF: ${inspection.error.message}`
-        : inspection.runs?.length
-          ? ''
-          : 'PDF opened successfully. No supported native Tj/TJ text runs were found for direct replacement. The PDF text layer is still selectable and searchable in the viewer.')
+      applyInspection(inspection)
       await previousSession?.close?.()
       void nextSession.pdfiumReady.then(() => {
         if (documentSessionRef.current === nextSession) setEngineStatus(nextSession.engineStatus)
@@ -402,9 +421,10 @@ function App() {
         { name: file.name, size: file.size, sizeLabel: formatBytes(file.size), file, openedAt: new Date().toISOString() },
         ...previous.filter((item) => item.name !== file.name),
       ].slice(0, 10))
-      showToast(nextSession.engineStatus === 'degraded'
-        ? `${file.name} opened with PDF.js. PDFium is unavailable; viewer fallback is active.`
-        : `${file.name} opened. PDFium is initializing in the background.`)
+      if (inspection.error) showToast(`${file.name} opened, but its text cannot be edited: ${inspection.error.message}`, 'warning')
+      else if (!inspection.blocks?.length) showToast(`${file.name} opened. No editable text was found — the pages may be scanned images. You can still add text, images and markup.`, 'warning')
+      else if (found) showToast(`${file.name} opened. ${extracted.length} item${extracted.length === 1 ? '' : 's'} added earlier in Earthix can be adjusted again.`)
+      else showToast(`${file.name} opened.`)
     } catch (error) {
       if (operationId === openSequenceRef.current) {
         setEngineError(error?.message || 'The selected PDF could not be opened.')
@@ -417,10 +437,10 @@ function App() {
       }
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
-  }, [installDocumentCore, showToast])
+  }, [applyInspection, clearSelections, installDocumentCore, showToast])
 
   const requireDocument = useCallback(() => {
-    if (!documentSessionRef.current || !originalPdfBytesRef.current) {
+    if (!documentSessionRef.current || !documentCoreRef.current) {
       showToast('Open a PDF document first.', 'error')
       return false
     }
@@ -432,95 +452,346 @@ function App() {
     const next = Math.max(0, Math.min(index, pageCount - 1))
     setCurrentPage(next)
     documentCoreRef.current?.setActivePage(next)
-    setSelectedViewerText('')
+    setActiveBlock((block) => (block && block.pageIndex !== next ? null : block))
+    setEditingText(null)
   }, [pageCount])
 
-  const chooseNativeRun = useCallback((run) => {
-    setNativeSelectedRunKey(run.key)
-    setNativeReplacementText(run.originalText)
-    setNativeEditError('')
-    setCurrentPage(run.pageIndex)
-    documentCoreRef.current?.setActivePage(run.pageIndex)
-    setNativeSearchTerm(run.originalText)
-    setSelectedViewerText('')
+  // ---------------------------------------------------------------------------
+  // Tools and selection
+  // ---------------------------------------------------------------------------
+
+  const setTool = useCallback((next) => {
+    setToolState(next)
+    drawSessionRef.current = null
+    setEditingText(null)
+    setPreviewObject(null)
+    if (next !== 'select' && next !== 'edit') setSelectedObjectId(null)
+    if (next !== 'edit') { setSelectedImageKey(null); setSelectedBlockKey(null); setActiveBlock(null) }
+    setHintTool(next)
+    globalThis.getSelection?.()?.removeAllRanges()
   }, [])
 
-  const applyNativeReplacement = async () => {
-    if (!nativeSelectedRun || !documentCoreRef.current) {
-      setNativeEditError('Choose a supported original PDF text run first.')
-      return
-    }
+  useEffect(() => {
+    if (!hintTool) return undefined
+    const timer = window.setTimeout(() => setHintTool(null), 4500)
+    return () => window.clearTimeout(timer)
+  }, [hintTool])
+
+  const objectsRef = useRef(objects)
+  objectsRef.current = objects
+  const maxZ = () => objectsRef.current.reduce((max, object) => Math.max(max, object.z ?? 0), 0)
+
+  const runObjectCommand = useCallback(async (command) => {
     const core = documentCoreRef.current
-    const command = new ReplaceNativeTextRunCommand(nativeSelectedRun, nativeReplacementText)
-    let commandApplied = false
-    setNativeEditBusy(true)
-    setNativeEditError('')
+    if (!core) return false
     try {
       await core.execute(command)
-      commandApplied = true
+      return true
+    } catch (error) {
+      showToast(error?.message || 'The change could not be applied.', 'error')
+      return false
+    }
+  }, [showToast])
+
+  const createObject = useCallback(async (object, label = 'Add item', { select = true } = {}) => {
+    const next = { rotation: 0, opacity: 1, ...object, z: maxZ() + 1 }
+    delete next.isNew
+    if (await runObjectCommand(new SetPageObjectsCommand({ upsert: [next] }, { label }))) {
+      if (select) setSelectedObjectId(next.id)
+      if (ONE_SHOT_TOOLS.has(tool)) setToolState('select')
+    }
+    return next
+  }, [runObjectCommand, tool])
+
+  const updateObject = useCallback(async (object, label = 'Change item') => {
+    setPreviewObject(null)
+    const next = object.type === 'text' ? fitTextObject(object) : object
+    await runObjectCommand(new SetPageObjectsCommand({ upsert: [next] }, { label }))
+  }, [runObjectCommand])
+
+  const removeObject = useCallback(async (object) => {
+    if (!object) return
+    if (await runObjectCommand(new SetPageObjectsCommand({ remove: [object.id] }, { label: `Delete ${objectLabel(object).toLowerCase()}` }))) {
+      setSelectedObjectId((id) => (id === object.id ? null : id))
+    }
+  }, [runObjectCommand])
+
+  const duplicateObject = useCallback(async (object) => {
+    if (!object) return
+    const copy = { ...moveObject(object, 14, 14), id: newId(object.type) }
+    await createObject(copy, `Duplicate ${objectLabel(object).toLowerCase()}`)
+  }, [createObject])
+
+  const arrangeObject = useCallback(async (object, direction) => {
+    const zs = objectsRef.current.filter((item) => item.pageIndex === object.pageIndex).map((item) => item.z ?? 0)
+    const z = direction > 0 ? Math.max(...zs) + 1 : Math.min(...zs) - 1
+    await updateObject({ ...object, z }, direction > 0 ? 'Bring to front' : 'Send to back')
+  }, [updateObject])
+
+  const handleInkStroke = useCallback(async (pageIndex, points) => {
+    const settings = toolSettings.draw
+    const session = drawSessionRef.current
+    const now = Date.now()
+    const existing = session && session.pageIndex === pageIndex && now - session.time < 4000
+      ? objectsRef.current.find((object) => object.id === session.id && object.color === settings.color && object.strokeWidth === settings.width)
+      : null
+    if (existing) {
+      const strokes = [...existing.strokes, points]
+      drawSessionRef.current = { ...session, time: now }
+      await runObjectCommand(new SetPageObjectsCommand({ upsert: [{ ...existing, strokes, ...inkBounds(strokes, existing.strokeWidth) }] }, { label: 'Draw' }))
+    } else {
+      const object = { id: newId('ink'), type: 'ink', pageIndex, strokes: [points], color: settings.color, strokeWidth: settings.width, opacity: settings.opacity, ...inkBounds([points], settings.width) }
+      drawSessionRef.current = { id: object.id, pageIndex, time: now }
+      await createObject(object, 'Draw', { select: false })
+    }
+  }, [createObject, runObjectCommand, toolSettings.draw])
+
+  const startTextEdit = useCallback((object) => {
+    if (object.isNew) {
+      setSelectedObjectId(null)
+      setEditingText(object)
+      return
+    }
+    const stored = objectsRef.current.find((item) => item.id === object.id) || object
+    setSelectedObjectId(stored.id)
+    setEditingText(stored)
+  }, [])
+
+  const commitTextEdit = useCallback(async (object, text) => {
+    setEditingText(null)
+    if (object.isNew) {
+      if (text.trim()) {
+        const created = fitTextObject({ ...object, text })
+        delete created.isNew
+        await createObject(created, 'Add text')
+      } else if (ONE_SHOT_TOOLS.has(tool)) {
+        setToolState('select')
+      }
+      return
+    }
+    if (text === object.text) return
+    if (!text.trim()) { await removeObject(object); return }
+    await updateObject({ ...object, text }, 'Edit text')
+  }, [createObject, removeObject, tool, updateObject])
+
+  const placeImageObject = useCallback(async (image, { point = null, pageIndex = currentPage, label = 'Add image', signature = false } = {}) => {
+    const info = await documentSessionRef.current?.getPageInfo?.(pageIndex).catch(() => null)
+    const pageWidth = info?.width || 612
+    const pageHeight = info?.height || 792
+    const maxWidth = pageWidth * (signature ? 0.3 : 0.5)
+    const naturalWidth = (image.pixelWidth || 400) * 0.75
+    const width = Math.min(maxWidth, naturalWidth)
+    const height = width * ((image.pixelHeight || 300) / (image.pixelWidth || 400))
+    const x = point ? point.x - width / 2 : (pageWidth - width) / 2
+    const y = point ? point.y - height / 2 : (pageHeight - height) / 3
+    await createObject({ id: newId('image'), type: 'image', pageIndex, assetId: newId('asset'), signature, ...image, x, y, width, height }, label)
+  }, [createObject, currentPage])
+
+  const chooseImage = useCallback((target = { kind: 'new' }) => {
+    imageTargetRef.current = target
+    imageInputRef.current?.click()
+  }, [])
+
+  // ---------------------------------------------------------------------------
+  // Original PDF text and images (rewritten inside the PDF)
+  // ---------------------------------------------------------------------------
+
+  const activeBlockRef = useRef(null)
+  const pdfBusyRef = useRef(false)
+  const nativeBlocksRef = useRef([])
+  const awaitingRenderRef = useRef(false)
+  activeBlockRef.current = activeBlock
+  pdfBusyRef.current = pdfBusy
+  nativeBlocksRef.current = nativeBlocks
+
+  const activateBlock = useCallback((block, clickPoint = null) => {
+    if (!block) return
+    setSelectedBlockKey(block.key)
+    setSelectedImageKey(null)
+    setSelectedObjectId(null)
+    if (!block.editable) { showToast(block.reason || 'This text cannot be edited.', 'warning'); return }
+    setCurrentPage(block.pageIndex)
+    setActiveClickPoint(clickPoint)
+    setEditorDraft(block.text)
+    setActiveBlock(block)
+    if (isCompact) setShowRight(true)
+  }, [isCompact, showToast])
+
+  const runPendingActivation = useCallback((blocks) => {
+    const pending = pendingActivationRef.current
+    pendingActivationRef.current = null
+    if (!pending) return
+    const next = blocks.find((block) => block.key === pending.block.key && block.text === pending.block.text) ||
+      findBlockNearPoint(blocks, pending.block.pageIndex, pending.block.startPoint, 1.5)
+    if (next) activateBlock(next, pending.clickPoint)
+  }, [activateBlock])
+
+  const requestBlockEdit = useCallback((block, clickPoint = null, event = null) => {
+    if (activeBlockRef.current || pdfBusyRef.current) {
+      pendingActivationRef.current = { block, clickPoint }
+      return
+    }
+    event?.preventDefault()
+    activateBlock(block, clickPoint)
+  }, [activateBlock])
+
+  const cancelBlockEdit = useCallback(() => {
+    setActiveBlock(null)
+    setEditorDraft('')
+    runPendingActivation(nativeBlocksRef.current)
+  }, [runPendingActivation])
+
+  const handlePageRendered = useCallback(() => {
+    if (!awaitingRenderRef.current) return
+    awaitingRenderRef.current = false
+    setActiveBlock(null)
+    setEditorDraft('')
+    setPdfBusy(false)
+    runPendingActivation(nativeBlocksRef.current)
+  }, [runPendingActivation])
+
+  /** Run a command that rewrites the PDF bytes, then show the new rendering. */
+  const runPdfCommand = useCallback(async (command, { onResult } = {}) => {
+    const core = documentCoreRef.current
+    if (!core || pdfBusyRef.current) return null
+    let applied = false
+    pdfBusyRef.current = true
+    setPdfBusy(true)
+    try {
+      await core.execute(command)
+      applied = true
       const result = command.getResult()
-      if (!result) throw new Error('The native text command did not return a verified replacement result.')
+      if (!result) throw new Error('The change did not return a verified result.')
       const bytes = core.getWorkingBytes()
-      const inspection = await inspectNativePdfText(bytes).catch((error) => ({ runs: [], fonts: [], error }))
-      let nextSession
       try {
-        nextSession = await replaceDocumentSession(bytes, fileName)
+        await replaceDocumentSession(bytes, core.fileName)
       } catch (openError) {
         await core.undo()
-        commandApplied = false
+        applied = false
         throw openError
       }
-
-      commandApplied = false
       originalPdfBytesRef.current = bytes.slice()
       setFileSize(bytes.byteLength)
-      setNativeRuns(inspection.runs || [])
-      setFontInspection(inspection.fonts || [])
-      setNativeSelectedRunKey(result.run.key)
-      setNativeReplacementText(result.replacementText)
-      setNativeSearchTerm(result.replacementText)
-      setHasNativeEdits(true)
-      setCurrentPage(result.run.pageIndex)
-      core.setActivePage(result.run.pageIndex)
-      setPages(createPages(nextSession))
-      setEngineStatus(nextSession.engineStatus)
-      if (inspection.error) {
-        setNativeEditError('Text was replaced, but font inspection needs to be refreshed: ' + inspection.error.message)
-      }
-      void nextSession.pdfiumReady.then(() => {
-        if (documentSessionRef.current === nextSession) setEngineStatus(nextSession.engineStatus)
-      })
-      showToast('Original PDF text replaced and recorded in Document Core history.')
+      applyInspection(result.inspection)
+      nativeBlocksRef.current = result.inspection?.blocks || []
+      onResult?.(result)
+      awaitingRenderRef.current = true
+      return result
     } catch (error) {
-      if (commandApplied) {
-        try {
-          await core.undo()
-        } catch (rollbackError) {
-          setNativeEditError('The PDF viewer could not reopen the replacement. Document rollback also failed: ' + rollbackError.message)
-        }
+      if (applied) {
+        try { await core.undo() } catch { /* already reported */ }
       }
-      setNativeEditError(error?.message || 'Native text replacement failed.')
-      showToast(error?.message || 'Native text replacement failed.', 'error')
-    } finally {
-      setNativeEditBusy(false)
+      pendingActivationRef.current = null
+      showToast(error?.message || 'The change could not be applied.', 'error')
+      pdfBusyRef.current = false
+      setPdfBusy(false)
+      return null
     }
-  }
+  }, [applyInspection, replaceDocumentSession, showToast])
 
-  const savePdf = async () => {
+  const fontToast = useCallback((plan, warnings = [], base) => {
+    const fontAccess = fontProviderRef.current?.status
+    const message = plan?.kind !== 'fallback'
+      ? base
+      : plan.match === 'exact'
+        ? `${base} New letters use ${plan.label} from this computer — the same font as the PDF.`
+        : fontAccess === 'unsupported' || fontAccess === 'denied'
+          ? `${base} ${plan.label} was used as the closest match. Open this editor in Chrome or Edge and allow font access to use the exact font.`
+          : `${base} ${plan.label} was used because the original font is not installed.`
+    showToast([message, ...warnings].join(' '), (plan?.kind === 'fallback' && plan.match !== 'exact') || warnings.length ? 'warning' : '')
+  }, [showToast])
+
+  const commitBlockEdit = useCallback(async (block, text) => {
+    const fontProvider = fontProviderRef.current
+    const supported = new Set(block.fontMetadata?.supportedCharacters || [])
+    if ([...text].some((character) => !/\s/.test(character) && !supported.has(character)) && fontProvider?.supported) void fontProvider.prepare()
+    await runPdfCommand(new ReplaceNativeTextBlockCommand(block, text, { fontProvider }), {
+      onResult: (result) => {
+        if (result.block) setSelectedBlockKey(result.block.key)
+        fontToast(result.fontPlan, result.warnings, 'Text updated in its original font, size and colour.')
+      },
+    })
+  }, [fontToast, runPdfCommand])
+
+  const restyleBlock = useCallback(async (block, style) => {
+    const fontProvider = fontProviderRef.current
+    if ((style.fontSource === 'local' || (style.fontFamily && !isStandardFamily(style.fontFamily)) || style.bold !== undefined || style.italic !== undefined) && fontProvider?.supported) void fontProvider.prepare()
+    const reference = { key: block.key, pageIndex: block.pageIndex, runKeys: [...block.runKeys], text: block.text }
+    await runPdfCommand(new TransformPdfBytesCommand((bytes) => restyleNativeTextBlock(bytes, reference, style, { fontProvider }), { label: 'Change text style', pageIndex: block.pageIndex }), {
+      onResult: (result) => {
+        if (result.block) setSelectedBlockKey(result.block.key)
+        fontToast(result.fontPlan, result.warnings, 'Text style updated.')
+      },
+    })
+  }, [fontToast, runPdfCommand])
+
+  const editImage = useCallback(async (image, operation, label) => {
+    await runPdfCommand(new TransformPdfBytesCommand((bytes) => editPageImage(bytes, image, operation), { label, pageIndex: image.pageIndex }), {
+      onResult: (result) => {
+        setSelectedImageKey(result.image?.key || null)
+        showToast(operation.type === 'delete' ? 'Image removed from the page.' : 'Image updated in the PDF.')
+      },
+    })
+  }, [runPdfCommand, showToast])
+
+  const handlePageImageAction = useCallback((image, operation) => {
+    if (operation.type === 'replace' && !operation.data) { chooseImage({ kind: 'page', image }); return }
+    const labels = { transform: 'Move image', delete: 'Delete image', opacity: 'Change image opacity', replace: 'Replace image' }
+    void editImage(image, operation, labels[operation.type])
+  }, [chooseImage, editImage])
+
+  const handleImageFile = useCallback(async (file) => {
+    const target = imageTargetRef.current || { kind: 'new' }
+    imageTargetRef.current = null
+    if (!file) return
+    try {
+      const image = await importImageFile(file)
+      if (target.kind === 'page') {
+        await editImage(target.image, { type: 'replace', data: image.data }, 'Replace image')
+      } else if (target.kind === 'object') {
+        const object = target.object
+        const height = object.width * (image.pixelHeight / image.pixelWidth)
+        await updateObject({ ...object, ...image, assetId: newId('asset'), height }, 'Replace image')
+      } else {
+        await placeImageObject(image)
+      }
+    } catch (error) {
+      showToast(error?.message || 'The picture could not be added.', 'error')
+    } finally {
+      if (imageInputRef.current) imageInputRef.current.value = ''
+    }
+  }, [editImage, placeImageObject, showToast, updateObject])
+
+  // ---------------------------------------------------------------------------
+  // Export and document-level operations
+  // ---------------------------------------------------------------------------
+
+  /** Working PDF plus every added item (text, images, markup…). */
+  const buildOutputBytes = useCallback(async ({ flatten = false } = {}) => {
+    const core = documentCoreRef.current
+    const bytes = core.getWorkingBytes()
+    const list = core.objects.list()
+    if (!list.length) return { bytes, warnings: [] }
+    if (list.some((object) => object.type === 'text' && object.fontSource === 'local') && fontProviderRef.current?.supported) {
+      await fontProviderRef.current.prepare()
+    }
+    return writePageObjects(bytes, list, { fontProvider: fontProviderRef.current, flatten })
+  }, [])
+
+  const savePdf = async ({ flatten = false } = {}) => {
     if (!requireDocument()) return
+    setExportMenu(false)
     setSaving(true)
     try {
       const core = documentCoreRef.current
-      if (!core) throw new Error('The document state is not initialized. Reopen the PDF and try again.')
       const wasDirty = core.isDirty
-      const validated = await core.validateForExport({ expectedPageCount: documentSession?.pageCount })
-      const bytes = validated.bytes
-      const outputName = `${fileName.replace(/\.pdf$/i, '')}${wasDirty ? '-edited' : ''}.pdf`
+      await core.validateForExport({ expectedPageCount: documentSession?.pageCount })
+      const { bytes, warnings } = await buildOutputBytes({ flatten })
+      await PDFDocument.load(bytes, { updateMetadata: false })
+      const outputName = `${fileName.replace(/\.pdf$/i, '')}${wasDirty || flatten ? '-edited' : ''}.pdf`
       downloadPdf(bytes, outputName)
       await core.markSaved()
-      originalPdfBytesRef.current = bytes.slice()
-      setHasNativeEdits(false)
-      showToast(wasDirty ? 'Updated PDF exported successfully.' : 'Original PDF exported successfully.')
+      showToast([flatten ? 'Flattened PDF downloaded. Added items are now part of the pages.' : 'PDF downloaded. Added items stay adjustable when you open it in Earthix again.', ...warnings].join(' '), warnings.length ? 'warning' : '')
     } catch (error) {
       showToast(`Could not export PDF: ${error?.message || 'Unknown error'}`, 'error')
     } finally {
@@ -533,54 +804,44 @@ function App() {
     if (!core) throw new Error('The document state is unavailable.')
     const snapshot = core.getSnapshot()
     const bytes = core.getWorkingBytes()
+    if (sameBytes(bytes, originalPdfBytesRef.current) && snapshot.pageCount === documentSessionRef.current?.pageCount) return snapshot
     const inspectionPromise = inspectNativePdfText(bytes).catch((error) => ({ runs: [], error }))
-    const nextSession = await replaceDocumentSession(bytes, snapshot.fileName)
+    await replaceDocumentSession(bytes, snapshot.fileName)
     originalPdfBytesRef.current = bytes.slice()
     setFileName(snapshot.fileName)
     setFileSize(bytes.byteLength)
     setCurrentPage(snapshot.currentPageIndex)
-    setHasNativeEdits(snapshot.isDirty)
-    setNativeSelectedRunKey('')
-    setNativeReplacementText('')
-    setNativeEditError('')
-    const inspection = await inspectionPromise
-    setNativeRuns(inspection.runs || [])
-    setFontInspection(inspection.fonts || [])
-    if (inspection.error) setNativeEditError(`Native text inspection is unavailable: ${inspection.error.message}`)
-    setEngineStatus(nextSession.engineStatus)
-    void nextSession.pdfiumReady.then(() => {
-      if (documentSessionRef.current === nextSession) setEngineStatus(nextSession.engineStatus)
-    })
+    setActiveBlock(null)
+    setSelectedImageKey(null)
+    applyInspection(await inspectionPromise)
     return snapshot
-  }, [replaceDocumentSession])
+  }, [applyInspection, replaceDocumentSession])
 
   const runHistoryAction = useCallback(async (action) => {
     const core = documentCoreRef.current
-    if (!core || !['undo', 'redo'].includes(action)) return
+    if (!core || !['undo', 'redo'].includes(action) || pdfBusyRef.current) return
+    setEditingText(null)
+    setPreviewObject(null)
     try {
       const changed = await core[action]()
       if (!changed) return
       await refreshViewerFromDocumentCore()
-      showToast(action === 'undo' ? 'Last document change undone.' : 'Document change restored.')
+      const ids = new Set(core.objects.list().map((object) => object.id))
+      setSelectedObjectId((id) => (id && ids.has(id) ? id : null))
     } catch (error) {
-      // Keep the in-memory document and viewer aligned if re-opening the
-      // historical PDF bytes fails after a command has moved the history cursor.
       try {
         await core[action === 'undo' ? 'redo' : 'undo']()
         await refreshViewerFromDocumentCore()
       } catch (restoreError) {
         showToast(`History recovery failed: ${restoreError.message}`, 'error')
       }
-      showToast(`Could not ${action} the document change: ${error.message}`, 'error')
+      showToast(`Could not ${action} the change: ${error.message}`, 'error')
     }
   }, [refreshViewerFromDocumentCore, showToast])
 
   const mergePdfs = async (files) => {
     if (!files?.length) return
-    if (files.length < 2) {
-      showToast('Select at least two PDF files to merge.', 'error')
-      return
-    }
+    if (files.length < 2) { showToast('Select at least two PDF files to merge.', 'error'); return }
     setProcessing(true)
     try {
       const output = await PDFDocument.create()
@@ -613,12 +874,11 @@ function App() {
     }
     setProcessing(true)
     try {
-      const source = await PDFDocument.load(originalPdfBytesRef.current)
+      const source = await PDFDocument.load((await buildOutputBytes()).bytes)
       const output = await PDFDocument.create()
       const copied = await output.copyPages(source, Array.from({ length: to - from + 1 }, (_, index) => from - 1 + index))
       copied.forEach((page) => output.addPage(page))
-      const bytes = await output.save({ useObjectStreams: true })
-      downloadPdf(bytes, fileName.replace(/\.pdf$/i, '') + '-pages-' + from + '-' + to + '.pdf')
+      downloadPdf(await output.save({ useObjectStreams: true }), fileName.replace(/\.pdf$/i, '') + '-pages-' + from + '-' + to + '.pdf')
       showToast('Pages ' + from + '–' + to + ' exported as a separate PDF.')
     } catch (error) {
       showToast('Split failed: ' + (error?.message || 'Unknown error'), 'error')
@@ -631,10 +891,10 @@ function App() {
     if (!requireDocument() || !pagePlanChanged) return
     setProcessing(true)
     try {
-      const bytes = await applyPagePlanToPdf(originalPdfBytesRef.current, pagePlan)
+      const bytes = await applyPagePlanToPdf((await buildOutputBytes()).bytes, pagePlan)
       await commitPdfBytes(bytes, fileName, 0)
       setActiveWorkspace('organize')
-      showToast('Page order and page operations applied to the PDF.')
+      showToast('Page changes applied to the PDF.')
     } catch (error) {
       showToast('Could not apply page changes: ' + (error?.message || 'Unknown error'), 'error')
     } finally {
@@ -646,11 +906,12 @@ function App() {
     if (!requireDocument()) return
     setProcessing(true)
     try {
-      const source = await PDFDocument.load(originalPdfBytesRef.current)
+      const input = (await buildOutputBytes()).bytes
+      const source = await PDFDocument.load(input)
       const bytes = await source.save({ useObjectStreams: true, addDefaultPage: false })
       downloadPdf(bytes, fileName.replace(/\.pdf$/i, '') + '-optimized.pdf')
-      const reduction = Math.round((1 - bytes.byteLength / originalPdfBytesRef.current.byteLength) * 100)
-      showToast(reduction > 0 ? 'Optimized copy exported (' + reduction + '% smaller).' : 'Optimized copy exported. The source may already be compressed.')
+      const reduction = Math.round((1 - bytes.byteLength / input.byteLength) * 100)
+      showToast(reduction > 0 ? 'Optimized copy downloaded (' + reduction + '% smaller).' : 'Optimized copy downloaded. The file was already compact.')
     } catch (error) {
       showToast('Optimization failed: ' + (error?.message || 'Unknown error'), 'error')
     } finally {
@@ -658,35 +919,20 @@ function App() {
     }
   }
 
-  const handleSidebar = async (id) => {
+  const handleNav = async (id) => {
+    setNavOpen(false)
     if (id === 'merge') { setActiveWorkspace('home'); mergeInputRef.current?.click(); return }
-    if (id === 'split') { setActiveWorkspace('split'); return }
-    if (id === 'organize') { setActiveWorkspace('organize'); setShowPages(false); return }
     if (id === 'compress') { setActiveWorkspace('edit'); await optimizePdf(); return }
-    if (id === 'home') { setActiveWorkspace('home'); return }
-    if (id === 'edit') { setActiveWorkspace('edit'); setNativeEditorOpen(true); setShowInspector(true); return }
+    setActiveWorkspace(id)
   }
 
-  const handleTextSelected = useCallback((text) => {
-    setSelectedViewerText((previous) => previous === text ? previous : text)
-  }, [])
-
-  const handleTextObjectClick = useCallback(({ pageIndex, text }) => {
-    setSelectedViewerText(text)
-    setNativeEditorOpen(true)
-    setShowInspector(true)
-    const matchResult = findNativeRunForText(nativeRuns, pageIndex, text)
-    if (matchResult.run) {
-      chooseNativeRun(matchResult.run)
-      return
-    }
-    setNativeSelectedRunKey('')
-    setNativeReplacementText('')
-    setNativeEditError(matchResult.reason)
-  }, [nativeRuns, chooseNativeRun])
-
   const handleViewerError = useCallback((error) => {
-    showToast(error?.message || 'PDF viewer could not render this page.', 'error')
+    if (awaitingRenderRef.current) {
+      awaitingRenderRef.current = false
+      setActiveBlock(null)
+      setPdfBusy(false)
+    }
+    showToast(error?.message || 'This page could not be shown.', 'error')
   }, [showToast])
 
   const changeZoom = (amount) => {
@@ -697,293 +943,520 @@ function App() {
   const onDrop = (event) => {
     event.preventDefault()
     setDragging(false)
-    const file = Array.from(event.dataTransfer?.files || []).find((item) => item.type === 'application/pdf' || item.name.toLowerCase().endsWith('.pdf'))
-    if (file) void openPdf(file)
-    else showToast('Drop a PDF document to open it.', 'error')
+    const files = Array.from(event.dataTransfer?.files || [])
+    const pdf = files.find((item) => item.type === 'application/pdf' || item.name.toLowerCase().endsWith('.pdf'))
+    const picture = files.find((item) => item.type.startsWith('image/'))
+    if (pdf) void openPdf(pdf)
+    else if (picture && documentSession) { imageTargetRef.current = { kind: 'new' }; void handleImageFile(picture) }
+    else showToast('Drop a PDF to open it, or a picture to add it to the page.', 'error')
   }
 
-  const engineStatusLabel = !documentSession
-    ? 'Waiting for PDF'
-    : engineStatus === 'ready'
-      ? 'PDF.js + PDFium ready'
-      : engineStatus === 'loading'
-        ? 'PDF.js ready · PDFium loading'
-        : 'PDF.js fallback active'
-  const documentSaveStatusLabel = !documentCoreState
-    ? ''
-    : documentCoreState.autosaveStatus === 'saving'
-      ? 'Saving locally…'
-      : documentCoreState.autosaveStatus === 'pending'
-        ? 'Autosave pending'
-        : documentCoreState.autosaveStatus === 'error'
-          ? 'Local autosave unavailable'
-          : documentCoreState.isDirty
-            ? 'Unsaved changes'
-            : 'All changes saved'
+  const loadLocalFonts = useCallback(async () => {
+    const provider = fontProviderRef.current
+    if (!provider?.supported) { showToast('This browser cannot list installed fonts. Open Earthix in Chrome or Edge to use your computer’s fonts.', 'warning'); return }
+    const entries = await provider.prepare()
+    setLocalFontStatus(provider.status)
+    if (!entries.length) { showToast('Font access was not allowed. Only standard PDF fonts can be used.', 'warning'); return }
+    setLocalFamilies([...new Set(entries.map((entry) => entry.family).filter(Boolean))].sort((a, b) => a.localeCompare(b)))
+  }, [showToast])
+
+  const updateToolSettings = useCallback((name, patch) => {
+    setToolSettings((current) => ({ ...current, [name]: { ...current[name], ...patch } }))
+    drawSessionRef.current = null
+  }, [])
+
+  // ---------------------------------------------------------------------------
+  // Keyboard
+  // ---------------------------------------------------------------------------
+
+  const selectedObject = useMemo(() => {
+    const object = objects.find((item) => item.id === selectedObjectId) || null
+    return object && previewObject?.id === object.id ? previewObject : object
+  }, [objects, selectedObjectId, previewObject])
 
   useEffect(() => {
-    const handleHistoryShortcut = (event) => {
-      if (!(event.ctrlKey || event.metaKey)) return
+    const onKeyDown = (event) => {
       const target = event.target
-      const isEditingField = target instanceof HTMLElement && (
-        target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
-      )
-      if (isEditingField) return
+      const typing = target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+      const mod = event.ctrlKey || event.metaKey
       const key = event.key.toLowerCase()
-      if (key === 'z') {
+      if (mod && key === 's') { event.preventDefault(); if (documentSessionRef.current) void savePdfRef.current() ; return }
+      if (typing) return
+      if (mod && key === 'z') { event.preventDefault(); void runHistoryAction(event.shiftKey ? 'redo' : 'undo'); return }
+      if (mod && key === 'y') { event.preventDefault(); void runHistoryAction('redo'); return }
+      if (mod && (key === '=' || key === '+')) { event.preventDefault(); changeZoomRef.current(0.1); return }
+      if (mod && key === '-') { event.preventDefault(); changeZoomRef.current(-0.1); return }
+      if (activeWorkspace !== 'edit' || !documentSessionRef.current) return
+      const object = selectedObjectRef.current
+      if (mod && key === 'd' && object) { event.preventDefault(); void duplicateObject(object); return }
+      if (mod && key === 'c' && object) { clipboardRef.current = object; return }
+      if (mod && key === 'v' && clipboardRef.current) {
         event.preventDefault()
-        void runHistoryAction(event.shiftKey ? 'redo' : 'undo')
-      } else if (key === 'y') {
+        const source = clipboardRef.current
+        void createObject({ ...moveObject(source, 16, 16), id: newId(source.type), pageIndex: currentPageRef.current }, 'Paste')
+        return
+      }
+      if ((key === 'delete' || key === 'backspace') && object) { event.preventDefault(); void removeObject(object); return }
+      if (key.startsWith('arrow') && object && !object.locked) {
         event.preventDefault()
-        void runHistoryAction('redo')
+        const step = event.shiftKey ? 10 : 1
+        const dx = key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0
+        const dy = key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0
+        void updateObject(moveObject(object, dx, dy), 'Nudge')
+        return
+      }
+      if (key === 'escape') {
+        if (selectedObjectRef.current || selectedImageKeyRef.current || selectedBlockKeyRef.current) clearSelections()
+        else setTool('select')
+        return
+      }
+      if (!mod && !event.altKey) {
+        const match = TOOLS.find((item) => item.key === key)
+        if (match) {
+          event.preventDefault()
+          if (match.id === 'image') chooseImage()
+          else if (match.id === 'signature') { signaturePointRef.current = null; setSignatureOpen(true) }
+          else setTool(match.id)
+        }
       }
     }
-    window.addEventListener('keydown', handleHistoryShortcut)
-    return () => window.removeEventListener('keydown', handleHistoryShortcut)
-  }, [runHistoryAction])
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [activeWorkspace, chooseImage, clearSelections, createObject, duplicateObject, removeObject, runHistoryAction, setTool, updateObject])
+
+  const savePdfRef = useRef(savePdf)
+  savePdfRef.current = savePdf
+  const changeZoomRef = useRef(changeZoom)
+  changeZoomRef.current = changeZoom
+  const selectedObjectRef = useRef(null)
+  selectedObjectRef.current = selectedObject
+  const selectedImageKeyRef = useRef(null)
+  selectedImageKeyRef.current = selectedImageKey
+  const selectedBlockKeyRef = useRef(null)
+  selectedBlockKeyRef.current = selectedBlockKey
+  const currentPageRef = useRef(0)
+  currentPageRef.current = currentPage
+
+  // ---------------------------------------------------------------------------
+  // Derived view state
+  // ---------------------------------------------------------------------------
+
+  const selectedBlock = useMemo(() => {
+    const block = activeBlock || nativeBlocks.find((item) => item.key === selectedBlockKey) || null
+    if (!block) return null
+    return { ...block, firstRun: nativeRuns.find((run) => run.key === block.runKeys[0]) || null }
+  }, [activeBlock, nativeBlocks, selectedBlockKey, nativeRuns])
+  const selectedImage = useMemo(() => pageImages.find((image) => image.key === selectedImageKey) || null, [pageImages, selectedImageKey])
+
+  const selection = selectedObject
+    ? { kind: 'object', object: selectedObject }
+    : tool === 'edit' && selectedBlock
+      ? { kind: 'block', block: selectedBlock, editing: Boolean(activeBlock) }
+      : tool === 'edit' && selectedImage
+        ? { kind: 'image', image: selectedImage }
+        : null
+
+  useEffect(() => {
+    if (!isMobile) return
+    setShowRight(Boolean(selection))
+  }, [isMobile, selectedObjectId, selectedBlockKey, selectedImageKey])
+
+  const objectCountByPage = useMemo(() => {
+    const counts = new Map()
+    for (const object of objects) counts.set(object.pageIndex, (counts.get(object.pageIndex) || 0) + 1)
+    return counts
+  }, [objects])
+
+  const pageObjects = useMemo(() => objects
+    .filter((object) => object.pageIndex === currentPage)
+    .map((object) => (previewObject?.id === object.id ? previewObject : object)), [objects, currentPage, previewObject])
+
+  const saveStatus = !documentCoreState
+    ? null
+    : documentCoreState.autosaveStatus === 'error'
+      ? { label: 'Autosave unavailable', tone: 'error' }
+      : documentCoreState.isDirty
+        ? { label: documentCoreState.autosaveStatus === 'saving' ? 'Saving locally…' : 'Edited · not exported', tone: 'dirty' }
+        : { label: 'No unsaved changes', tone: '' }
+
+  const objectActions = useMemo(() => ({
+    update: (object, label) => void updateObject(object, label),
+    preview: (object) => setPreviewObject(object),
+    remove: (object) => void removeObject(object),
+    duplicate: (object) => void duplicateObject(object),
+    arrange: (object, direction) => void arrangeObject(object, direction),
+    replaceImage: (object) => chooseImage({ kind: 'object', object }),
+  }), [arrangeObject, chooseImage, duplicateObject, removeObject, updateObject])
+
+  const localFonts = { families: localFamilies, supported: fontProviderRef.current?.supported, status: localFontStatus, onLoad: () => void loadLocalFonts() }
+
+  const selectTool = (id) => {
+    if (id === 'image') { chooseImage(); return }
+    if (id === 'signature') { signaturePointRef.current = null; setSignatureOpen(true); return }
+    setTool(id)
+  }
+
+  const placeSignature = async (result) => {
+    setSignatureOpen(false)
+    const point = signaturePointRef.current
+    signaturePointRef.current = null
+    if (result.kind === 'image') {
+      await placeImageObject(result, { point, label: 'Add signature', signature: true })
+      return
+    }
+    const info = await documentSessionRef.current?.getPageInfo?.(currentPage).catch(() => null)
+    const pageWidth = info?.width || 612
+    const pageHeight = info?.height || 792
+    const width = Math.min(170, pageWidth * 0.35)
+    const scale = width / result.width
+    const height = result.height * scale
+    const x = point ? point.x - width / 2 : (pageWidth - width) / 2
+    const y = point ? point.y - height / 2 : pageHeight * 0.6
+    const strokes = result.strokes.map((stroke) => stroke.map((item) => ({ x: x + item.x * scale, y: y + item.y * scale })))
+    const strokeWidth = 1.6
+    await createObject({ id: newId('signature'), type: 'ink', signature: true, pageIndex: currentPage, strokes, color: result.color, strokeWidth, opacity: 1, ...inkBounds(strokes, strokeWidth) }, 'Add signature')
+    setToolState('select')
+  }
+
+  const onStagePointerDown = (event) => {
+    if (event.target.closest?.('.object-node, .selection-frame, .endpoint-handle, .earthix-text-hit, .earthix-inline-editor, .page-image-hit, .text-object-editor, .object-drag-proxy, .create-surface')) return
+    setSelectedObjectId(null)
+    setSelectedImageKey(null)
+    if (!activeBlockRef.current) setSelectedBlockKey(null)
+  }
+
+  const renderOverlay = ({ viewport, scale, canvas, pageIndex }) => (
+    <>
+      {tool === 'edit' && (
+        <PageImageLayer
+          images={pageImages.filter((image) => image.pageIndex === pageIndex)}
+          scale={scale}
+          canvas={canvas}
+          selectedKey={selectedImageKey}
+          busy={pdfBusy}
+          onSelect={(image) => { setSelectedImageKey(image.key); setSelectedBlockKey(null); setSelectedObjectId(null); if (!image.editable) showToast(image.reason, 'warning') }}
+          onTransform={(image, to) => void editImage(image, { type: 'transform', from: image.viewRect, to }, 'Move image')}
+        />
+      )}
+      <ObjectLayer
+        pageIndex={pageIndex}
+        scale={scale}
+        pageWidth={viewport.width / scale}
+        pageHeight={viewport.height / scale}
+        objects={pageObjects}
+        tool={tool}
+        settings={toolSettings}
+        selectedId={selectedObjectId}
+        editingObject={editingText}
+        busy={pdfBusy}
+        fontVersion={fontVersion}
+        onSelect={(id) => { setSelectedObjectId(id); setSelectedImageKey(null); if (id) setSelectedBlockKey(null) }}
+        onChange={(object, label) => void updateObject(object, label)}
+        onCreate={(object, label) => void createObject(object, label, { select: object.type !== 'highlight' })}
+        onInkStroke={(points) => void handleInkStroke(pageIndex, points)}
+        onStartText={startTextEdit}
+        onTextCommit={(object, text) => void commitTextEdit(object, text)}
+        onPlaceSignature={(point) => { signaturePointRef.current = point; setSignatureOpen(true) }}
+      />
+    </>
+  )
+
+  const documentInfo = {
+    fileName, fileSize: formatBytes(fileSize), pageCount, currentPage, objectCount: objects.length,
+    editableBlocks: nativeBlocks.filter((block) => block.editable).length,
+  }
+  const activeToolInfo = TOOL_BY_ID.get(hintTool)
+  const editingWorkspace = activeWorkspace === 'edit'
+
+  const toolButtons = (
+    TOOLS.map((item) => {
+      const Icon = item.icon
+      return (
+        <button
+          key={item.id}
+          type="button"
+          className={`tool-btn ${tool === item.id ? 'active' : ''}`}
+          title={`${item.label} (${item.key.toUpperCase()}) — ${item.hint}`}
+          aria-pressed={tool === item.id}
+          disabled={!documentSession}
+          onClick={() => selectTool(item.id)}
+        >
+          <Icon /><span>{item.label}</span>
+        </button>
+      )
+    })
+  )
 
   return (
-    <main className="studio-shell">
+    <main className="app-shell">
       <input ref={fileInputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event) => void openPdf(event.target.files?.[0])} />
       <input ref={mergeInputRef} type="file" accept="application/pdf,.pdf" multiple hidden onChange={(event) => void mergePdfs(Array.from(event.target.files || []))} />
+      <input ref={imageInputRef} type="file" accept="image/*" hidden onChange={(event) => void handleImageFile(event.target.files?.[0])} />
 
-      <aside className="studio-sidebar">
-        <Brand />
-        <button className="sidebar-open" type="button" onClick={() => fileInputRef.current?.click()}><FaUpload /> Open PDF</button>
-        <nav className="sidebar-nav" aria-label="Main navigation">
-          {sidebarGroups.map((group) => (
-            <section className="nav-group" key={group.label}>
-              <h2>{group.label}</h2>
-              {group.items.map((item) => {
-                const Icon = item.icon
-                const active = item.id === activeWorkspace
-                return <button type="button" key={item.id} className={`nav-link ${active ? 'active' : ''}`} onClick={() => void handleSidebar(item.id)}><Icon /><span>{item.label}</span></button>
-              })}
-            </section>
-          ))}
+      {isMobile && navOpen && <div className="backdrop" onClick={() => setNavOpen(false)} />}
+      <aside className={`app-rail ${navOpen ? 'open' : ''}`} aria-label="Main navigation">
+        <div className="rail-brand" title="Earthix PDF Studio">e</div>
+        <nav className="rail-nav">
+          {NAV_ITEMS.map((item) => {
+            const Icon = item.icon
+            return (
+              <button key={item.id} type="button" className={`rail-item ${item.id === activeWorkspace ? 'active' : ''}`} onClick={() => void handleNav(item.id)}>
+                <Icon /><span>{item.label}</span>
+              </button>
+            )
+          })}
         </nav>
-        <div className="sidebar-footer">EARTHIX TECHNOLOGIES · 2026</div>
+        <div className="rail-bottom">
+          <button type="button" className="rail-item" onClick={() => { setNavOpen(false); fileInputRef.current?.click() }}><FaUpload /><span>Open</span></button>
+          <button type="button" className="rail-item" onClick={toggleTheme} title="Switch light / dark theme">{effectiveTheme === 'dark' ? <FaSun /> : <FaMoon />}<span>{effectiveTheme === 'dark' ? 'Light' : 'Dark'}</span></button>
+        </div>
       </aside>
 
-      <section className="studio-main">
-        <header className="studio-header">
-          <div className="document-tab">
-            <FaFilePdf />
-            <span title={fileName}>{fileName}</span>
-            <button type="button" onClick={() => fileInputRef.current?.click()} aria-label="Open another document"><FaPlus /></button>
+      <section className="app-main">
+        <header className="app-header">
+          <div className="header-left">
+            <button type="button" className="icon-btn only-mobile" onClick={() => setNavOpen(true)} aria-label="Open menu"><FaBars /></button>
+            <div className="brand-text"><strong>Earthix</strong><span>PDF Studio</span></div>
+            <div className="doc-chip" title={fileName}>
+              <FaFilePdf />
+              <span>{fileName}</span>
+              <button type="button" className="icon-btn sm" onClick={() => fileInputRef.current?.click()} title="Open another PDF" aria-label="Open another PDF"><FaPlus /></button>
+            </div>
           </div>
           <div className="header-right">
-            <span className="local-status"><i /> Local & private</span>
-            {documentSaveStatusLabel && <span className={`document-save-status ${documentCoreState?.autosaveStatus === 'error' ? 'error' : ''}`} title={documentCoreState?.autosaveError || 'Document changes are stored locally in this browser.'}>{documentSaveStatusLabel}</span>}
-            <span className="profile-avatar">E</span>
+            {saveStatus && <span className={`save-pill ${saveStatus.tone}`} title={documentCoreState?.autosaveError || 'Edits are kept in this browser until you export.'}><i />{saveStatus.label}</span>}
+            {editingWorkspace && <button type="button" className="icon-btn only-mobile" title="Undo" onClick={() => void runHistoryAction('undo')} disabled={!documentCoreState?.canUndo || pdfBusy}><FaUndo /></button>}
+            {editingWorkspace && <button type="button" className="icon-btn only-mobile" title="Redo" onClick={() => void runHistoryAction('redo')} disabled={!documentCoreState?.canRedo || pdfBusy}><FaRedo /></button>}
+            <div className="menu-wrap">
+              <div style={{ display: 'flex', gap: 2 }}>
+                <button className="btn btn-primary" type="button" onClick={() => void savePdf()} disabled={!documentSession || saving || processing} title="Download the edited PDF (Ctrl+S)">
+                  {saving ? <FaSpinner className="spin" /> : <FaDownload />}<span>{saving ? 'Exporting…' : 'Export PDF'}</span>
+                </button>
+                <button className="btn btn-secondary hide-mobile" type="button" style={{ width: 34, padding: 0 }} onClick={() => setExportMenu((value) => !value)} disabled={!documentSession} aria-label="More export options"><FaChevronDown /></button>
+              </div>
+              {exportMenu && (
+                <>
+                  <div style={{ position: 'fixed', inset: 0, zIndex: 50 }} onClick={() => setExportMenu(false)} />
+                  <div className="menu">
+                    <button type="button" onClick={() => void savePdf()}><FaDownload /><div>Download PDF<small>Added items stay adjustable in Earthix</small></div></button>
+                    <button type="button" onClick={() => void savePdf({ flatten: true })}><FaLayerGroup /><div>Download flattened PDF<small>Merge every added item into the pages</small></div></button>
+                    <hr />
+                    <button type="button" onClick={() => { setExportMenu(false); window.print() }}><FaPrint /><div>Print</div></button>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </header>
 
-        {activeWorkspace === 'edit' && <section className="studio-toolbar" aria-label="PDF viewer tools">
-          <div className="history-buttons">
-            <button type="button" title="Undo (Ctrl+Z)" onClick={() => void runHistoryAction('undo')} disabled={!documentCoreState?.canUndo || processing || saving}><FaUndo /></button>
-            <button type="button" title="Redo (Ctrl+Shift+Z)" onClick={() => void runHistoryAction('redo')} disabled={!documentCoreState?.canRedo || processing || saving}><FaRedo /></button>
-          </div>
-          <span className="toolbar-divider" />
-          <div className="toolbar-tools">
-            {viewerTools.map((tool) => {
-              const Icon = tool.icon
-              const active = tool.id === 'text-edit' ? nativeEditorOpen : !nativeEditorOpen
-              return (
-                <button type="button" key={tool.id} title={tool.hint} className={`tool-choice ${active ? 'active' : ''}`} onClick={() => tool.id === 'text-edit' ? (setNativeEditorOpen(true), setShowInspector(true)) : setNativeEditorOpen(false)} disabled={!documentSession}>
-                  <Icon /><span>{tool.label}</span>
-                </button>
-              )
-            })}
-            <div className="more-menu-wrap">
-              <button type="button" className={`tool-choice ${showMore ? 'active' : ''}`} onClick={() => setShowMore((value) => !value)}><FaEllipsisH /><span>More</span><FaChevronDown className="tiny-chevron" /></button>
-              {showMore && <div className="more-menu">
-                <button type="button" onClick={() => { setShowMore(false); window.print() }}><FaFilePdf /> Print document</button>
-                <button type="button" onClick={() => { setShowMore(false); setShowPages(true) }}><FaList /> Show page thumbnails</button>
-                <button type="button" onClick={() => { setShowMore(false); setShowInspector(true) }}><FaSlidersH /> Show properties</button>
-              </div>}
+        {editingWorkspace && (
+          <section className="editor-toolbar" aria-label="Editing tools">
+            <div className="toolbar-group">
+              <button type="button" className="icon-btn" title="Undo (Ctrl+Z)" onClick={() => void runHistoryAction('undo')} disabled={!documentCoreState?.canUndo || processing || saving || pdfBusy}><FaUndo /></button>
+              <button type="button" className="icon-btn" title="Redo (Ctrl+Y)" onClick={() => void runHistoryAction('redo')} disabled={!documentCoreState?.canRedo || processing || saving || pdfBusy}><FaRedo /></button>
             </div>
-          </div>
-          <div className="toolbar-spacer" />
-          <button className="save-action" type="button" onClick={() => void savePdf()} disabled={!documentSession || saving || processing}>
-            {saving ? <FaSpinner className="spin" /> : <FaDownload />}
-            <span>{saving ? 'Exporting…' : 'Export PDF'}</span>
-          </button>
-        </section>}
-
-        <section className="studio-workspace">
-          {activeWorkspace === 'home' ? <HomeWorkspace
-            onOpenPdf={() => fileInputRef.current?.click()}
-            onMerge={() => mergeInputRef.current?.click()}
-            recentFiles={recentFiles}
-            onOpenRecent={(item) => item.file ? void openPdf(item.file) : showToast('This recent file is no longer available in this browser session.', 'error')}
-            pageCount={pageCount}
-            fileName={documentSession ? fileName : ''}
-          /> : activeWorkspace === 'split' ? <SplitWorkspace
-            pageCount={pageCount}
-            fileName={fileName}
-            fromPage={splitFrom}
-            toPage={splitTo}
-            setFromPage={setSplitFrom}
-            setToPage={setSplitTo}
-            onSplit={() => void splitPdf()}
-            processing={processing}
-            onOpenPdf={() => fileInputRef.current?.click()}
-          /> : activeWorkspace === 'organize' ? <OrganizeWorkspace
-            session={documentSession}
-            plan={pagePlan}
-            onMove={(from, to) => setPagePlan((current) => movePageInPlan(current, from, to))}
-            onRotate={(index, amount) => setPagePlan((current) => rotatePageInPlan(current, index, amount))}
-            onRemove={(index) => setPagePlan((current) => removePageFromPlan(current, index))}
-            onAddBlank={() => setPagePlan((current) => addBlankPage(current))}
-            onApply={() => void applyOrganizeChanges()}
-            onReset={() => setPagePlan(createPagePlan(pageCount))}
-            changed={pagePlanChanged}
-            processing={processing}
-            onOpenPdf={() => fileInputRef.current?.click()}
-          /> : <>
-          {showPages && <aside className="pages-sidebar">
-            <div className="panel-heading"><div><strong>Pages</strong><small>{pageCount} total</small></div><button type="button" onClick={() => setShowPages(false)} title="Hide pages"><FaTimes /></button></div>
-            <div className="pages-list">
-              {pages.map((page) => (
-                <PdfPageThumbnail
-                  key={`${documentSession?.fileName || 'document'}-${page.id}`}
-                  session={documentSession}
-                  pageIndex={page.index}
-                  active={page.index === currentPage}
-                  engineStatus={engineStatus}
-                  onClick={() => setPage(page.index)}
-                />
-              ))}
-              {!pageCount && <div className="empty-pages"><FaFilePdf /><span>Pages will appear here</span></div>}
+            <span className="toolbar-sep" />
+            <div className="tool-strip">{toolButtons}</div>
+            <span className="toolbar-sep" />
+            <div className="toolbar-group">
+              <button type="button" className={`icon-btn ${showLeft ? 'active' : ''}`} title="Pages, search and items" onClick={() => setShowLeft((value) => !value)}><FaList /></button>
+              <button type="button" className={`icon-btn ${showRight ? 'active' : ''}`} title="Properties" onClick={() => setShowRight((value) => !value)}><FaSlidersH /></button>
             </div>
-            <div className="page-actions"><button type="button" onClick={() => setActiveWorkspace("organize")} disabled={!documentSession}><FaSlidersH /> Organize pages</button></div>
-          </aside>}
-
-          <section className="document-stage">
-            <div className="stage-heading">
-              <div><span>DOCUMENT</span><strong>{fileName}</strong></div>
-              <div className="document-health"><i className={engineStatus === 'ready' ? 'ready' : ''} />{engineStatusLabel}</div>
-            </div>
-            <div
-              className={`pdf-stage-viewport ${dragging ? 'dragging' : ''}`}
-              onDragOver={(event) => { event.preventDefault(); setDragging(true) }}
-              onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDragging(false) }}
-              onDrop={onDrop}
-            >
-              {!documentSession && !engineError && (
-                <div className="welcome-card">
-                  <span className="welcome-icon"><FaFilePdf /></span>
-                  <h1>Your PDF workspace</h1>
-                  <p>Open or drop a PDF to view, search, select and navigate its original pages.</p>
-                  <button type="button" onClick={() => fileInputRef.current?.click()}><FaUpload /> Choose a PDF</button>
-                  <small>PDFs stay on this device. No document upload is performed.</small>
-                </div>
-              )}
-              {engineError && <div className="engine-error"><FaTools /><h2>PDF could not be opened</h2><p>{engineError}</p><button type="button" onClick={() => fileInputRef.current?.click()}>Choose another PDF</button></div>}
-              {dragging && <div className="pdf-drop-overlay"><FaUpload /><strong>Drop PDF to open</strong></div>}
-              {documentSession && <PdfPageViewer
-                session={documentSession}
-                pageIndex={currentPage}
-                zoomMode={zoomMode}
-                zoom={zoom}
-                searchQuery={nativeSearchTerm}
-                searchItemIndexes={currentSearchItemIndexes}
-                engineStatus={engineStatus}
-                onZoomChange={setZoom}
-                onTextSelected={handleTextSelected}
-                onTextObjectClick={nativeEditorOpen ? handleTextObjectClick : undefined}
-                onRenderError={handleViewerError}
-              />}
-              {processing && <div className="processing-mask"><FaSpinner className="spin" /><span>{processingProgress ? `Processing PDF… ${processingProgress}%` : 'Processing PDF…'}</span></div>}
-            </div>
-            <footer className="stage-footer">
-              <div className="page-navigation">
-                <button type="button" onClick={() => setPage(currentPage - 1)} disabled={!pageCount || currentPage <= 0} aria-label="Previous page"><FaChevronLeft /></button>
-                <span>Page <b>{pageCount ? currentPage + 1 : 0}</b> of {pageCount}</span>
-                <button type="button" onClick={() => setPage(currentPage + 1)} disabled={!pageCount || currentPage >= pageCount - 1} aria-label="Next page"><FaChevronRight /></button>
-              </div>
-              <span className="stage-footer-separator" />
-              <div className="zoom-controls">
-                <button type="button" onClick={() => changeZoom(-0.1)} disabled={!documentSession} title="Zoom out"><FaMinus /></button>
-                <span>{Math.round(zoom * 100)}%</span>
-                <button type="button" onClick={() => changeZoom(0.1)} disabled={!documentSession} title="Zoom in"><FaPlus /></button>
-                <button type="button" className="fit-button" title="Fit width" onClick={() => setZoomMode('width')} disabled={!documentSession}><FaExpand /></button>
-                <button type="button" className="fit-button" title="Fit page" onClick={() => setZoomMode('page')} disabled={!documentSession}><FaCompress /></button>
-              </div>
-            </footer>
           </section>
+        )}
 
-          {showInspector && <aside className="inspector-sidebar">
-            <div className="panel-heading inspector-title"><div><strong>Properties</strong><small>{nativeSelectedRun ? `Page ${nativeSelectedRun.pageNumber} · Text selected` : selectedViewerText ? 'Viewer text selected' : 'Document information'}</small></div><button type="button" onClick={() => setShowInspector(false)} title="Hide properties"><FaTimes /></button></div>
-            {nativeEditorOpen && documentSession ? (
-              <div className="inspector-content native-editor-content">
-                <div className="selection-indicator"><FaExchangeAlt /><div><strong>Native PDF text editor</strong><small>Find and replace supported original text runs</small></div></div>
-                <div className="native-editor-note"><FaLock /><span>Text selection in the viewer is for reading and copying. Use this panel to replace supported original PDF text. Unsupported font encodings are rejected instead of creating duplicate overlays.</span></div>
-                <label className="field-label" htmlFor="native-pdf-text-search">Search entire PDF</label>
-                <div className="native-search-field"><FaSearch /><input id="native-pdf-text-search" value={nativeSearchTerm} onChange={(event) => setNativeSearchTerm(event.target.value)} placeholder="Find text anywhere in PDF" /></div>
-                <small className="native-character-hint">Searches selectable text across the document and filters supported editable text runs below.</small>
-                {nativeSearchTerm.trim() && <section className="pdf-search-results" aria-label="PDF search results">
-                  <div className="pdf-search-results-heading"><strong>PDF search results</strong><small>{pdfSearchBusy ? 'Searching…' : `${pdfSearchResults.length}${pdfSearchResults.length >= 80 ? ' (limit reached)' : ''} match(es)`}</small></div>
-                  <div className="pdf-search-results-list">
-                    {pdfSearchResults.map((result) => (
-                      <button type="button" key={result.id} onClick={() => setPage(result.pageIndex)} className={result.pageIndex === currentPage ? 'active' : ''} aria-label={`Go to page ${result.pageNumber}: ${result.text}`}>
-                        <span>{result.text}</span><small>Page {result.pageNumber}</small>
-                      </button>
-                    ))}
-                    {!pdfSearchBusy && !pdfSearchResults.length && <p className="native-empty-state">No text matches found in this PDF.</p>}
+        <section className="workspace">
+          {activeWorkspace === 'home' ? (
+            <HomeWorkspace
+              onOpenPdf={() => fileInputRef.current?.click()}
+              onMerge={() => mergeInputRef.current?.click()}
+              recentFiles={recentFiles}
+              onOpenRecent={(item) => (item.file ? void openPdf(item.file) : showToast('This recent file is no longer available in this browser session.', 'error'))}
+              pageCount={pageCount}
+              fileName={documentSession ? fileName : ''}
+            />
+          ) : activeWorkspace === 'split' ? (
+            <SplitWorkspace pageCount={pageCount} fileName={fileName} fromPage={splitFrom} toPage={splitTo} setFromPage={setSplitFrom} setToPage={setSplitTo} onSplit={() => void splitPdf()} processing={processing} onOpenPdf={() => fileInputRef.current?.click()} />
+          ) : activeWorkspace === 'organize' ? (
+            <OrganizeWorkspace
+              session={documentSession}
+              plan={pagePlan}
+              onMove={(from, to) => setPagePlan((current) => movePageInPlan(current, from, to))}
+              onRotate={(index, amount) => setPagePlan((current) => rotatePageInPlan(current, index, amount))}
+              onRemove={(index) => setPagePlan((current) => removePageFromPlan(current, index))}
+              onAddBlank={() => setPagePlan((current) => addBlankPage(current))}
+              onApply={() => void applyOrganizeChanges()}
+              onReset={() => setPagePlan(createPagePlan(pageCount))}
+              changed={pagePlanChanged}
+              processing={processing}
+              onOpenPdf={() => fileInputRef.current?.click()}
+            />
+          ) : (
+            <>
+              {showLeft && (
+                <aside className="side-panel left" aria-label="Document panel">
+                  <div className="panel-tabs" role="tablist">
+                    <button type="button" className={leftTab === 'pages' ? 'active' : ''} onClick={() => setLeftTab('pages')}>Pages</button>
+                    <button type="button" className={leftTab === 'search' ? 'active' : ''} onClick={() => setLeftTab('search')}>Search</button>
+                    <button type="button" className={leftTab === 'items' ? 'active' : ''} onClick={() => setLeftTab('items')}>Items{objects.length ? ` (${objects.length})` : ''}</button>
+                    {isCompact && <button type="button" style={{ flex: 'none', width: 30 }} onClick={() => setShowLeft(false)} aria-label="Close panel"><FaTimes /></button>}
                   </div>
-                </section>}
-                <div className="native-run-heading"><strong>Editable native text runs</strong><small>{filteredNativeRuns.length} shown</small></div>
-                <div className="native-run-list" role="listbox" aria-label="Supported original PDF text runs">
-                  {filteredNativeRuns.map((run) => (
-                    <button type="button" key={run.key} className={`native-run-option ${nativeSelectedRunKey === run.key ? 'active' : ''}`} onClick={() => chooseNativeRun(run)}>
-                      <span>{run.originalText || '(empty text)'}</span>
-                      <small>Page {run.pageNumber} · {run.fontResource} · {run.tokenType}{run.hasKerningAdjustments ? ' · fixed spacing' : ''}</small>
-                    </button>
-                  ))}
-                  {!filteredNativeRuns.length && <p className="native-empty-state">No supported native text runs match this search. You can still select and copy visible text in the viewer.</p>}
+                  <div className="panel-body">
+                    {leftTab === 'pages' && (
+                      <div className="pages-grid">
+                        {pages.map((page) => (
+                          <div key={`${documentSession?.fileName || 'document'}-${page.id}`} className="thumb-wrap">
+                            <PdfPageThumbnail session={documentSession} pageIndex={page.index} active={page.index === currentPage} engineStatus={engineStatus} onClick={() => { setPage(page.index); if (isCompact) setShowLeft(false) }} />
+                            {objectCountByPage.get(page.index) > 0 && <span className="thumb-badge" title="Added items on this page">{objectCountByPage.get(page.index)}</span>}
+                          </div>
+                        ))}
+                        {!pageCount && <p className="empty-note">Page previews appear here when a PDF is open.</p>}
+                      </div>
+                    )}
+                    {leftTab === 'search' && (
+                      <>
+                        <div className="search-field"><FaSearch /><input value={nativeSearchTerm} onChange={(event) => setNativeSearchTerm(event.target.value)} placeholder="Search in this PDF" disabled={!documentSession} autoFocus /></div>
+                        {nativeSearchTerm.trim() && <p className="list-heading" style={{ marginTop: 14 }}><span>Results</span><span>{pdfSearchBusy ? 'Searching…' : `${pdfSearchResults.length}${pdfSearchResults.length >= 80 ? '+' : ''}`}</span></p>}
+                        <div className="list-stack">
+                          {pdfSearchResults.map((result) => (
+                            <button type="button" key={result.id} className={`list-item ${result.pageIndex === currentPage ? 'active' : ''}`} onClick={() => { setPage(result.pageIndex); if (isCompact) setShowLeft(false) }}>
+                              <span className="li-text"><strong>{result.text}</strong><small>Page {result.pageNumber}</small></span>
+                            </button>
+                          ))}
+                        </div>
+                        {nativeSearchTerm.trim() && !pdfSearchBusy && !pdfSearchResults.length && <p className="empty-note">No matches found.</p>}
+                        {!nativeSearchTerm.trim() && <p className="empty-note">Type a word to find it on every page.</p>}
+                      </>
+                    )}
+                    {leftTab === 'items' && (
+                      <>
+                        {!objects.length && <p className="empty-note">Text, images, highlights, drawings and comments you add appear here.</p>}
+                        {[...new Set(objects.map((object) => object.pageIndex))].sort((a, b) => a - b).map((pageIndex) => (
+                          <div key={pageIndex}>
+                            <p className="list-heading"><span>Page {pageIndex + 1}</span></p>
+                            <div className="list-stack">
+                              {objects.filter((object) => object.pageIndex === pageIndex).sort((a, b) => (b.z ?? 0) - (a.z ?? 0)).map((object) => (
+                                <button type="button" key={object.id} className={`list-item ${object.id === selectedObjectId ? 'active' : ''}`} onClick={() => { setPage(pageIndex); setTool('select'); setSelectedObjectId(object.id); if (isCompact) setShowLeft(false) }}>
+                                  <span className="li-text">
+                                    <strong>{object.type === 'text' ? object.text.split('\n')[0] || 'Text' : object.type === 'note' ? object.text || 'Comment' : object.type === 'highlight' && object.text ? object.text : objectLabel(object)}</strong>
+                                    <small>{objectLabel(object)}</small>
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                </aside>
+              )}
+
+              <section className="stage">
+                <div
+                  className={`stage-viewport ${dragging ? 'dragging' : ''}`}
+                  onPointerDown={onStagePointerDown}
+                  onDragOver={(event) => { event.preventDefault(); setDragging(true) }}
+                  onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setDragging(false) }}
+                  onDrop={onDrop}
+                >
+                  {!documentSession && !engineError && (
+                    <div className="welcome">
+                      <div className="welcome-card">
+                        <span className="welcome-icon"><FaFilePdf /></span>
+                        <h1>Open a PDF to start editing</h1>
+                        <p>Edit existing text in its own font, add text, images and signatures, highlight, draw and comment.</p>
+                        <button type="button" className="btn btn-primary" onClick={() => fileInputRef.current?.click()}><FaUpload /> Choose PDF</button>
+                        <small>or drop a file here · it never leaves this device</small>
+                        <div className="welcome-features">
+                          {TOOLS.slice(1, 9).map((item) => { const Icon = item.icon; return <span key={item.id}><Icon />{item.label}</span> })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {engineError && <div className="engine-error"><FaTools /><h2>This PDF could not be opened</h2><p>{engineError}</p><button type="button" className="btn btn-secondary" onClick={() => fileInputRef.current?.click()}>Choose another PDF</button></div>}
+                  {documentSession && (
+                    <PdfPageViewer
+                      session={documentSession}
+                      pageIndex={currentPage}
+                      zoomMode={zoomMode}
+                      zoom={zoom}
+                      searchQuery={nativeSearchTerm}
+                      searchItemIndexes={currentSearchItemIndexes}
+                      engineStatus={engineStatus}
+                      editMode={tool === 'edit'}
+                      textBlocks={nativeBlocks}
+                      activeBlock={activeBlock}
+                      activeClickPoint={activeClickPoint}
+                      editBusy={pdfBusy}
+                      onBlockActivate={requestBlockEdit}
+                      onBlockCommit={commitBlockEdit}
+                      onBlockCancel={cancelBlockEdit}
+                      onDraftChange={setEditorDraft}
+                      onPageRendered={handlePageRendered}
+                      onZoomChange={setZoom}
+                      onTextSelected={() => undefined}
+                      onRenderError={handleViewerError}
+                      renderOverlay={renderOverlay}
+                      textLayerActive={tool === 'select' || tool === 'highlight'}
+                      selectedBlockKey={selectedBlockKey}
+                    />
+                  )}
+                  {documentSession && activeToolInfo && activeToolInfo.id !== 'select' && <div className="tool-hint"><activeToolInfo.icon />{activeToolInfo.hint}</div>}
+                  {processing && <div className="processing-mask"><FaSpinner className="spin" /><span>{processingProgress ? `Processing PDF… ${processingProgress}%` : 'Processing PDF…'}</span></div>}
                 </div>
-                {nativeSelectedRun && (
-                  <div className="native-replacement-form">
-                    <label className="field-label" htmlFor="native-original-text">Selected original text</label>
-                    <textarea id="native-original-text" value={nativeSelectedRun.originalText} readOnly rows={3} />
-                    <label className="field-label" htmlFor="native-replacement-text">Replacement text</label>
-                    <textarea id="native-replacement-text" value={nativeReplacementText} onChange={(event) => setNativeReplacementText(event.target.value)} rows={3} spellCheck="false" />
-                    <small className="native-character-hint">The selected embedded font maps {nativeSelectedRun.fontMetadata?.supportedCharacterCount ?? nativeSelectedRun.supportedCharacters?.length ?? 0} replacement character(s). Unsupported characters are blocked.</small>
-                    <button type="button" className="native-replace-button" onClick={() => void applyNativeReplacement()} disabled={nativeEditBusy || !nativeReplacementCompatibility?.supported || nativeReplacementText === nativeSelectedRun.originalText}>
-                      {nativeEditBusy ? <FaSpinner className="spin" /> : <FaExchangeAlt />}
-                      {nativeEditBusy ? 'Replacing…' : 'Replace original PDF text'}
-                    </button>
-                    {nativeReplacementCompatibility && !nativeReplacementCompatibility.supported && <small className="native-edit-glyph-warning" role="status">{nativeReplacementCompatibility.reason}</small>}
+                <footer className="stage-footer">
+                  <button type="button" className="icon-btn sm only-mobile" onClick={() => setShowLeft(true)} title="Pages"><FaList /></button>
+                  <div className="page-nav">
+                    <button type="button" className="icon-btn sm" onClick={() => setPage(currentPage - 1)} disabled={!pageCount || currentPage <= 0} aria-label="Previous page"><FaChevronLeft /></button>
+                    <input value={pageInput} inputMode="numeric" aria-label="Page number" disabled={!pageCount}
+                      onChange={(event) => setPageInput(event.target.value.replace(/\D/g, ''))}
+                      onBlur={() => { const value = Number(pageInput); if (value >= 1 && value <= pageCount) setPage(value - 1); else setPageInput(String(currentPage + 1)) }}
+                      onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+                    <span>/ {pageCount || 0}</span>
+                    <button type="button" className="icon-btn sm" onClick={() => setPage(currentPage + 1)} disabled={!pageCount || currentPage >= pageCount - 1} aria-label="Next page"><FaChevronRight /></button>
                   </div>
-                )}
-                <FontInspectorPanel fonts={fontInspection} run={nativeSelectedRun} replacementText={nativeReplacementText} />
-                {nativeEditError && <div className="native-edit-error" role="alert">{nativeEditError}</div>}
-                <div className="native-editor-footer">{nativeRuns.length} supported native text runs detected. Viewer text selection is rendered separately from the original PDF content.</div>
-              </div>
-            ) : (
-              <div className="inspector-content document-inspector">
-                <span className="document-icon"><FaInfoCircle /></span>
-                <h3>Document information</h3>
-                <p>Current PDF session details.</p>
-                <div className="detail-row"><span>File</span><strong title={fileName}>{fileName}</strong></div>
-                <div className="detail-row"><span>File size</span><strong>{formatBytes(fileSize)}</strong></div>
-                <div className="detail-row"><span>Pages</span><strong>{pageCount}</strong></div>
-                <div className="detail-row"><span>Renderer</span><strong>{engineStatus === 'ready' ? 'PDFium + PDF.js' : 'PDF.js'}</strong></div>
-                {selectedViewerText && <div className="selected-viewer-text"><strong>Selected text</strong><p>{selectedViewerText}</p><button type="button" onClick={() => navigator.clipboard?.writeText(selectedViewerText).then(() => showToast('Selected text copied.')).catch(() => showToast('Clipboard access is unavailable.', 'error'))}>Copy selected text</button></div>}
-                <div className="privacy-card"><FaLock /><div><strong>Private document session</strong><span>Your PDF is processed locally in this browser tab.</span></div></div>
-                <button type="button" className="outline-full-button" onClick={() => { setNativeEditorOpen(true); setShowInspector(true) }} disabled={!documentSession}><FaEdit /> Open native text tools</button>
-              </div>
-            )}
-          </aside>}
+                  <span className="footer-sep" />
+                  <div className="zoom-box">
+                    <button type="button" className="icon-btn sm" onClick={() => changeZoom(-0.1)} disabled={!documentSession} title="Zoom out (Ctrl −)"><FaMinus /></button>
+                    <span>{Math.round(zoom * 100)}%</span>
+                    <button type="button" className="icon-btn sm" onClick={() => changeZoom(0.1)} disabled={!documentSession} title="Zoom in (Ctrl +)"><FaPlus /></button>
+                  </div>
+                  <button type="button" className={`icon-btn sm ${zoomMode === 'width' ? 'active' : ''}`} title="Fit width" onClick={() => setZoomMode('width')} disabled={!documentSession}><FaExpand /></button>
+                  <button type="button" className={`icon-btn sm hide-compact ${zoomMode === 'page' ? 'active' : ''}`} title="Fit page" onClick={() => setZoomMode('page')} disabled={!documentSession}><FaCompress /></button>
+                  <button type="button" className="icon-btn sm only-mobile" onClick={() => setShowRight((value) => !value)} title="Properties"><FaSlidersH /></button>
+                </footer>
+              </section>
 
-          {!showPages && <button type="button" className="reopen-panel left" onClick={() => setShowPages(true)} title="Show pages"><FaList /></button>}
-          {!showInspector && <button type="button" className="reopen-panel right" onClick={() => setShowInspector(true)} title="Show properties"><FaSlidersH /></button>}
-          </>}
+              {showRight && (
+                <PropertiesPanel
+                  selection={selection}
+                  tool={tool}
+                  toolSettings={toolSettings}
+                  onToolSettings={updateToolSettings}
+                  objectActions={objectActions}
+                  blockBusy={pdfBusy}
+                  imageBusy={pdfBusy}
+                  onBlockStyle={(block, style) => void restyleBlock(block, style)}
+                  onImage={handlePageImageAction}
+                  localFonts={localFonts}
+                  fonts={fontInspection}
+                  editorDraft={editorDraft}
+                  documentInfo={documentInfo}
+                  onClose={() => setShowRight(false)}
+                  onChooseImage={() => chooseImage()}
+                  onSignature={() => { signaturePointRef.current = null; setSignatureOpen(true) }}
+                />
+              )}
+              {isCompact && !isMobile && (showLeft || showRight) && <div className="backdrop" style={{ position: 'absolute', zIndex: 75 }} onClick={() => { setShowLeft(false); setShowRight(false) }} />}
+            </>
+          )}
         </section>
       </section>
-      <Toast message={toastMessage} type={toast.type} onClose={closeToast} />
+
+      {isMobile && editingWorkspace && documentSession && <nav className="mobile-dock" aria-label="Editing tools">{toolButtons}</nav>}
+      {signatureOpen && <SignatureDialog onCancel={() => { setSignatureOpen(false); signaturePointRef.current = null }} onConfirm={(result) => void placeSignature(result)} />}
+      <Toast message={toast.message} type={toast.type} onClose={closeToast} />
     </main>
   )
 }

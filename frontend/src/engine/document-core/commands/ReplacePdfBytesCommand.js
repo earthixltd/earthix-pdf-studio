@@ -9,7 +9,7 @@ function copyBytes(bytes) {
 }
 
 export class ReplacePdfBytesCommand {
-  constructor(bytes, { fileName, pageCount, label = 'Replace document content' } = {}) {
+  constructor(bytes, { fileName, pageCount, label = 'Replace document content', objects = [] } = {}) {
     if (!Number.isInteger(pageCount) || pageCount < 1) {
       throw new PdfEngineError('Replacement document must contain at least one page.', { code: 'INVALID_PAGE_COUNT' })
     }
@@ -17,6 +17,7 @@ export class ReplacePdfBytesCommand {
     this.fileName = fileName
     this.pageCount = pageCount
     this.label = label
+    this.objects = structuredClone(objects || [])
     this.previousState = null
   }
 
@@ -27,7 +28,7 @@ export class ReplacePdfBytesCommand {
       fileName: this.fileName ?? core.fileName,
       pageCount: this.pageCount,
       pages: null,
-      objects: [],
+      objects: this.objects,
     })
   }
 

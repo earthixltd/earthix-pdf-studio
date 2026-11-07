@@ -1,13 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { TextLayer } from 'pdfjs-dist'
 import 'pdfjs-dist/web/pdf_viewer.css'
 import { FaFilePdf, FaSpinner } from 'react-icons/fa'
 import { calculatePdfZoom, clampPdfZoom } from './zoomMath.js'
 import { applySearchHighlights } from './applySearchHighlights.js'
+import { InlineTextEditor } from '../text-editor/InlineTextEditor.jsx'
+import { viewportRect } from '../text-editor/blockGeometry.js'
 import './pdf-viewer.css'
 
 const MAX_DEVICE_PIXEL_RATIO = 2
 
+function hitRect(block, viewport) {
+  const rect = viewportRect(viewport, block.bbox)
+  const pad = 1
+  return { left: rect.left - pad, top: rect.top - pad, width: rect.width + pad * 2, height: rect.height + pad * 2 }
+}
 
 export function PdfPageViewer({
   session,
@@ -17,23 +24,40 @@ export function PdfPageViewer({
   searchQuery = '',
   searchItemIndexes = [],
   engineStatus = 'loading',
+  editMode = false,
+  textBlocks = [],
+  activeBlock = null,
+  activeClickPoint = null,
+  editBusy = false,
+  onBlockActivate,
+  onBlockCommit,
+  onBlockCancel,
+  onDraftChange,
+  onPageRendered,
   onZoomChange,
   onTextSelected,
-  onTextObjectClick,
   onRenderError,
+  renderOverlay,
+  textLayerActive = true,
+  selectedBlockKey = null,
 }) {
   const viewportRef = useRef(null)
   const pageHostRef = useRef(null)
   const textLayerRef = useRef(null)
+  const canvasRef = useRef(null)
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
   const [renderState, setRenderState] = useState('idle')
   const [renderError, setRenderError] = useState('')
   const [pageScale, setPageScale] = useState(1)
+  const [pageViewport, setPageViewport] = useState(null)
+  const [renderedPageIndex, setRenderedPageIndex] = useState(null)
   const [textMatchCount, setTextMatchCount] = useState(0)
   const searchQueryRef = useRef(searchQuery)
   const searchItemIndexesRef = useRef(searchItemIndexes)
+  const onPageRenderedRef = useRef(onPageRendered)
   searchQueryRef.current = searchQuery
   searchItemIndexesRef.current = searchItemIndexes
+  onPageRenderedRef.current = onPageRendered
 
   const measureViewport = useCallback(() => {
     const element = viewportRef.current
@@ -61,12 +85,14 @@ export function PdfPageViewer({
     let textLayer = null
     let pageProxy = null
     let selectionHandler = null
+    let textLayerElement = null
     setRenderState('loading')
     setRenderError('')
     setTextMatchCount(0)
     textLayerRef.current = null
-    pageHostRef.current.replaceChildren()
 
+    // The previous rendering stays visible until the new one is ready, so a
+    // text edit never flashes an empty page.
     const render = async () => {
       try {
         pageProxy = await session.pdfJsDocument.getPage(pageIndex + 1)
@@ -94,7 +120,7 @@ export function PdfPageViewer({
         canvas.setAttribute('role', 'img')
         canvas.setAttribute('aria-label', `Rendered PDF page ${pageIndex + 1}`)
 
-        const textLayerElement = document.createElement('div')
+        textLayerElement = document.createElement('div')
         textLayerElement.className = 'textLayer earthix-pdf-text-layer'
         textLayerElement.style.width = `${viewport.width}px`
         textLayerElement.style.height = `${viewport.height}px`
@@ -102,15 +128,16 @@ export function PdfPageViewer({
         textLayerElement.setAttribute('role', 'group')
         textLayerElement.setAttribute('aria-label', `Selectable text on page ${pageIndex + 1}`)
 
-        pageHostRef.current.style.width = `${viewport.width}px`
-        pageHostRef.current.style.height = `${viewport.height}px`
-        pageHostRef.current.replaceChildren(canvas, textLayerElement)
-
         const textContent = await pageProxy.getTextContent({
           includeMarkedContent: false,
           disableNormalization: true,
         })
-        if (cancelled) return
+        if (cancelled || !pageHostRef.current) return
+
+        pageHostRef.current.style.width = `${viewport.width}px`
+        pageHostRef.current.style.height = `${viewport.height}px`
+        pageHostRef.current.replaceChildren(canvas, textLayerElement)
+        canvasRef.current = canvas
 
         textLayer = new TextLayer({
           textContentSource: textContent,
@@ -127,19 +154,14 @@ export function PdfPageViewer({
           const selectedText = globalThis.getSelection?.()?.toString()?.trim() || ''
           onTextSelected?.(selectedText)
         }
-        const textObjectClickHandler = (event) => {
-          const target = event.target instanceof HTMLElement ? event.target.closest('span') : null
-          if (!target || !textLayerElement.contains(target)) return
-          const text = target.textContent?.replace(/\s+/g, ' ').trim() || ''
-          if (text) onTextObjectClick?.({ pageIndex, text })
-        }
         textLayerElement.addEventListener('mouseup', selectionHandler)
-        textLayerElement.addEventListener('click', textObjectClickHandler)
-        textLayerElement.__earthixTextObjectClickHandler = textObjectClickHandler
 
         setPageScale(scale)
+        setPageViewport(viewport)
+        setRenderedPageIndex(pageIndex)
         onZoomChange?.(scale)
         setRenderState('ready')
+        onPageRenderedRef.current?.(pageIndex)
       } catch (error) {
         if (cancelled) return
         const message = error?.message || 'This PDF page could not be rendered.'
@@ -153,25 +175,29 @@ export function PdfPageViewer({
 
     return () => {
       cancelled = true
-      if (selectionHandler && pageHostRef.current) {
-        const layer = pageHostRef.current.querySelector('.earthix-pdf-text-layer')
-        layer?.removeEventListener('mouseup', selectionHandler)
-        if (layer?.__earthixTextObjectClickHandler) {
-          layer.removeEventListener('click', layer.__earthixTextObjectClickHandler)
-          delete layer.__earthixTextObjectClickHandler
-        }
-      }
+      if (selectionHandler && textLayerElement) textLayerElement.removeEventListener('mouseup', selectionHandler)
       textLayerRef.current = null
       textLayer?.cancel?.()
       pageProxy?.cleanup?.()
-      pageHostRef.current?.replaceChildren()
     }
-  }, [session, pageIndex, zoomMode, zoom, viewportSize.width, viewportSize.height, engineStatus, onRenderError, onTextSelected, onTextObjectClick, onZoomChange])
+  }, [session, pageIndex, zoomMode, zoom, viewportSize.width, viewportSize.height, engineStatus, onRenderError, onTextSelected, onZoomChange])
+
+  useEffect(() => {
+    if (session) return
+    pageHostRef.current?.replaceChildren()
+    canvasRef.current = null
+    setPageViewport(null)
+    setRenderedPageIndex(null)
+  }, [session])
 
   useEffect(() => {
     if (!textLayerRef.current) return
     setTextMatchCount(applySearchHighlights(textLayerRef.current, searchQuery, searchItemIndexes))
   }, [searchQuery, searchItemIndexes])
+
+  const pageBlocks = useMemo(() => textBlocks.filter((block) => block.pageIndex === pageIndex), [textBlocks, pageIndex])
+  const showEditLayer = editMode && pageViewport && renderedPageIndex === pageIndex && renderState !== 'error'
+  const editorBlock = activeBlock && activeBlock.pageIndex === pageIndex ? activeBlock : null
 
   return (
     <div className="earthix-pdf-viewer" ref={viewportRef} role="region" aria-label="PDF viewer" aria-busy={renderState === 'loading'}>
@@ -184,7 +210,46 @@ export function PdfPageViewer({
       )}
       {session && (
         <div className="earthix-pdf-scroll-area">
-          <div className="earthix-pdf-page" ref={pageHostRef} />
+          <div
+            className={`earthix-pdf-page ${editMode ? 'is-editing' : ''} ${editBusy ? 'is-busy' : ''} ${textLayerActive ? '' : 'text-layer-off'}`}
+            style={pageViewport ? { width: `${pageViewport.width}px`, height: `${pageViewport.height}px` } : undefined}
+          >
+            <div className="earthix-pdf-surface" ref={pageHostRef} />
+            {showEditLayer && (
+              <div className="earthix-edit-layer" aria-label="Editable PDF text">
+                {pageBlocks.map((block) => {
+                  if (editorBlock && editorBlock.key === block.key) return null
+                  const rect = hitRect(block, pageViewport)
+                  return (
+                    <div
+                      key={block.key}
+                      className={`earthix-text-hit ${block.editable ? '' : 'is-locked'} ${block.key === selectedBlockKey ? 'is-selected' : ''}`}
+                      style={{ left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` }}
+                      title={block.editable ? 'Click to edit this text' : block.reason}
+                      onMouseDown={(event) => {
+                        if (event.button !== 0) return
+                        onBlockActivate?.(block, { clientX: event.clientX, clientY: event.clientY }, event)
+                      }}
+                    />
+                  )
+                })}
+                {editorBlock && (
+                  <InlineTextEditor
+                    key={editorBlock.key}
+                    block={editorBlock}
+                    viewport={pageViewport}
+                    canvas={canvasRef.current}
+                    clickPoint={activeClickPoint}
+                    busy={editBusy}
+                    onCommit={(text) => onBlockCommit?.(editorBlock, text)}
+                    onCancel={() => onBlockCancel?.(editorBlock)}
+                    onDraftChange={onDraftChange}
+                  />
+                )}
+              </div>
+            )}
+            {pageViewport && renderedPageIndex === pageIndex && renderState !== 'error' && renderOverlay?.({ viewport: pageViewport, scale: pageScale, canvas: canvasRef.current, pageIndex })}
+          </div>
         </div>
       )}
       {session && renderState === 'loading' && (

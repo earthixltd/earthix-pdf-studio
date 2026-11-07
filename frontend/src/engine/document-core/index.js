@@ -13,3 +13,5 @@ export { validateDocumentForExport } from './validation/validateDocumentForExpor
 export { DocumentRecoveryService, createDocumentRecoveryService } from './DocumentRecoveryService.js'
 
 export { ReplaceNativeTextRunCommand } from './commands/ReplaceNativeTextRunCommand.js'
+export { ReplaceNativeTextBlockCommand } from './commands/ReplaceNativeTextBlockCommand.js'
+export { TransformPdfBytesCommand, SetPageObjectsCommand } from './commands/TransformPdfBytesCommand.js'

@@ -1,1179 +1,1038 @@
-const latin1 = (bytes) => {
-  const chunks = []
-  const chunkSize = 0x8000
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    chunks.push(String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length))))
+// Earthix native PDF text editor.
+//
+// Text is edited inside the page content streams themselves: the original
+// text-showing operators are rewritten in place (no overlay, no duplicate).
+// Font, size, colour, rendering mode and matrices are inherited from the
+// original graphics state. When the original embedded (subset) font lacks a
+// typed character, the same font installed on this computer — or the closest
+// available match — is embedded and used for that text block only.
+// Words that follow the edited text on the same line are moved by exactly the
+// width difference so lengthening or shortening text never overlaps.
+
+import { PdfDocumentIndex } from '../engine/pdf-parser/pdfDocumentIndex.js'
+import { writeIncrementalUpdate } from '../engine/pdf-parser/incrementalWriter.js'
+import { deflate } from '../engine/pdf-parser/pdfStreams.js'
+import { formatPdfNumber, latin1Bytes, name, PdfDict, PdfRef } from '../engine/pdf-parser/pdfSyntax.js'
+import { interpretPageText } from '../engine/content-stream/contentStream.js'
+import { buildTextBlocks, hasSeparatorBetween, runAlong, runAngle } from '../engine/content-stream/textBlocks.js'
+import { resolveFallbackFont } from '../engine/font-engine/fallbackFonts.js'
+import { createStandardFontEncoder } from '../engine/font-engine/fontEmbedder.js'
+import { normalizeFontKey } from '../engine/font-engine/pdfFontLoader.js'
+import { invertMatrix, multiplyMatrix, pageGeometry, rotateMatrix, scaleMatrix, transformPoint, translateMatrix } from '../engine/page-objects/pageGeometry.js'
+import { isStandardFamily, standardFontFor } from '../engine/page-objects/textLayout.js'
+import { buildImageXObject, detectImageFormat } from '../engine/page-objects/imageCodec.js'
+
+const dot = (point, vector) => point.x * vector.x + point.y * vector.y
+const stripSpaces = (value) => String(value || '').replace(/\s+/g, '')
+// Scripts whose PDF glyph order differs from Unicode order (Indic, Arabic, Hebrew, Thai, ...).
+const COMPLEX_SCRIPT = /[\u0590-\u08ff\u0900-\u0dff\u0e00-\u0fff\u1000-\u109f\u1780-\u17ff]/
+
+// ---------------------------------------------------------------------------
+// Analysis
+// ---------------------------------------------------------------------------
+
+async function analyzeDocument(bytes) {
+  const index = await PdfDocumentIndex.open(bytes)
+  const pages = index.getPages()
+  const context = { fontCache: new Map(), streams: new Map(), runs: [], warnings: [], activeForms: new Set() }
+  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+    try {
+      await interpretPageText(index, pages[pageIndex], pageIndex, context)
+    } catch (error) {
+      context.warnings.push(`Page ${pageIndex + 1}: ${error?.message || 'text could not be read'}`)
+    }
   }
-  return chunks.join('')
-}
 
-const latin1Bytes = (value) => Uint8Array.from(value, (character) => character.charCodeAt(0) & 0xff)
-const concatBytes = (parts) => {
-  const total = parts.reduce((sum, part) => sum + part.length, 0)
-  const output = new Uint8Array(total)
-  let offset = 0
-  for (const part of parts) {
-    output.set(part, offset)
-    offset += part.length
+  // Keys must be unique even when a Form XObject is drawn more than once.
+  const seen = new Map()
+  for (const run of context.runs) {
+    const count = seen.get(run.key) || 0
+    seen.set(run.key, count + 1)
+    if (count) run.key = `${run.key}#${count}`
   }
-  return output
-}
 
-function findDictionaryEnd(source, start) {
-  let depth = 0
-  let inLiteral = false
-  let literalDepth = 0
-  let escaped = false
-  let inHex = false
-
-  for (let index = start; index < source.length - 1; index += 1) {
-    const char = source[index]
-    const next = source[index + 1]
-
-    if (inLiteral) {
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === '(') literalDepth += 1
-      else if (char === ')') {
-        literalDepth -= 1
-        if (literalDepth === 0) inLiteral = false
+  const metadataCache = new Map()
+  const fontRecords = new Map()
+  for (const run of context.runs) {
+    const font = context.fontCache.get(run.fontKey)
+    if (!font) continue
+    const resourceName = run.fontResource || 'ExtGState'
+    const cacheKey = `${run.fontKey}|${resourceName}`
+    if (!metadataCache.has(cacheKey)) metadataCache.set(cacheKey, font.metadataFor(resourceName))
+    const metadata = metadataCache.get(cacheKey)
+    run.fontMetadata = metadata
+    run.fontInfoId = `${run.pageIndex}:${metadata.id}`
+    run.fontEncoding = metadata.encoding
+    const record = fontRecords.get(metadata.id)
+    if (record) {
+      if (!record.pageIndices.includes(run.pageIndex)) {
+        record.pageIndices.push(run.pageIndex)
+        record.pageNumbers.push(run.pageIndex + 1)
       }
-      continue
-    }
-
-    if (inHex) {
-      if (char === '>') inHex = false
-      continue
-    }
-
-    if (char === '(') {
-      inLiteral = true
-      literalDepth = 1
-      continue
-    }
-
-    if (char === '<' && next !== '<') {
-      inHex = true
-      continue
-    }
-
-    if (char === '<' && next === '<') {
-      depth += 1
-      index += 1
-      continue
-    }
-
-    if (char === '>' && next === '>') {
-      depth -= 1
-      index += 1
-      if (depth === 0) return index + 1
-    }
+    } else fontRecords.set(metadata.id, { ...metadata, pageIndices: [run.pageIndex], pageNumbers: [run.pageIndex + 1] })
   }
 
-  throw new Error('Malformed PDF dictionary.')
+  const runsByPage = new Map()
+  context.runsByKey = new Map()
+  for (const run of context.runs) {
+    context.runsByKey.set(run.key, run)
+    if (!runsByPage.has(run.pageIndex)) runsByPage.set(run.pageIndex, [])
+    runsByPage.get(run.pageIndex).push(run)
+  }
+  const blocks = []
+  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+    for (const block of buildTextBlocks(runsByPage.get(pageIndex) || [], pageIndex, context.rules?.get(pageIndex))) {
+      decorateBlock(block, context)
+      blocks.push(block)
+    }
+  }
+  const images = describeImages(index, pages, context.images || [])
+  return { index, pages, context, runs: context.runs, blocks, images, fonts: [...fontRecords.values()], rules: context.rules || new Map() }
 }
 
-function readIndirectObjectAtOffset(source, offset, index = null) {
-  const tail = source.slice(offset)
-  const header = tail.match(/^(\d+)\s+(\d+)\s+obj\b/)
-  if (!header) throw new Error('PDF indirect object header could not be read at byte offset ' + offset + '.')
+export { analyzeDocument as analyzePdfDocument }
 
-  const objectNumber = Number(header[1])
-  const generation = Number(header[2])
-  const bodyStart = header[0].length
-  const dictStart = tail.indexOf('<<', bodyStart)
-  if (dictStart < 0) {
-    const endObject = tail.indexOf('endobj', bodyStart)
-    return { objectNumber, generation, body: tail.slice(bodyStart, endObject < 0 ? undefined : endObject).trim(), dictionary: null, stream: null }
-  }
-
-  const dictEnd = findDictionaryEnd(tail, dictStart)
-  const dictionary = tail.slice(dictStart, dictEnd)
-  const endObjectMarker = tail.indexOf('endobj', dictEnd)
-  const streamMarker = tail.indexOf('stream', dictEnd)
-  if (streamMarker < 0 || endObjectMarker < 0 || streamMarker > endObjectMarker) {
-    return { objectNumber, generation, dictionary, body: dictionary, stream: null }
-  }
-
-  let streamStart = streamMarker + 6
-  if (tail.slice(streamStart, streamStart + 2) === '\r\n') streamStart += 2
-  else if (tail[streamStart] === '\n' || tail[streamStart] === '\r') streamStart += 1
-
-  let length = Number(dictionary.match(/\/Length(?!\d)\s+(\d+)(?!\s+\d+\s+R)/)?.[1])
-  if (!Number.isFinite(length) && index) {
-    const indirectLength = dictionary.match(/\/Length(?!\d)\s+(\d+)\s+\d+\s+R/)
-    if (indirectLength) {
-      const lengthObject = getPdfObject(index, Number(indirectLength[1]))
-      length = Number(lengthObject.body ?? lengthObject.dictionary)
+/** Page images with their on-screen box (view space at 100 %). */
+function describeImages(index, pages, images) {
+  const geometries = new Map()
+  const seen = new Map()
+  return images.map((image) => {
+    if (!geometries.has(image.pageIndex)) geometries.set(image.pageIndex, pageGeometry(index, pages[image.pageIndex]))
+    const geometry = geometries.get(image.pageIndex)
+    const corners = image.corners.map((point) => transformPoint(geometry.toView, point.x, point.y))
+    const xs = corners.map((point) => point.x)
+    const ys = corners.map((point) => point.y)
+    const count = seen.get(image.key) || 0
+    seen.set(image.key, count + 1)
+    let editable = true
+    let reason = ''
+    if (image.depth > 0 || image.owner?.kind !== 'page') {
+      editable = false
+      reason = 'This image is part of a reusable graphic in the PDF, so it cannot be moved or replaced on its own.'
     }
-  }
-  if (!Number.isFinite(length) || length < 0) {
-    throw new Error('PDF object ' + objectNumber + ' has an indirect or invalid stream length that could not be resolved safely.')
-  }
+    return {
+      key: count ? `${image.key}#${count}` : image.key,
+      pageIndex: image.pageIndex,
+      pageNumber: image.pageIndex + 1,
+      kind: image.kind,
+      name: image.name,
+      pixelWidth: image.pixelWidth,
+      pixelHeight: image.pixelHeight,
+      imageMask: image.imageMask,
+      viewRect: { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) },
+      viewCorners: corners,
+      pageSize: { width: geometry.width, height: geometry.height },
+      editable,
+      reason,
+      // Internal (not needed by the UI).
+      streamObjectNumber: image.streamObjectNumber,
+      start: image.start,
+      end: image.end,
+      ctm: image.ctm,
+      depth: image.depth,
+    }
+  }).filter((image) => image.viewRect.width > 0.5 && image.viewRect.height > 0.5)
+}
 
-  const absoluteStreamStart = offset + streamStart
-  const streamEnd = absoluteStreamStart + length
-  if (streamEnd > source.length) throw new Error('PDF object ' + objectNumber + ' stream exceeds the document length.')
+function decorateBlock(block, context) {
+  const run = context.runsByKey?.get(block.runKeys[0]) || context.runs.find((item) => item.key === block.runKeys[0])
+  const font = context.fontCache.get(block.fontKey)
+  block.fontMetadata = run?.fontMetadata || null
+  block.cssFontStack = font?.cssFontStack || 'sans-serif'
+  block.fontWeight = font?.bold ? 700 : 400
+  block.fontStyle = font?.italic ? 'italic' : 'normal'
+  block.ascentUser = ((font?.ascent ?? 800) / 1000) * block.fontSizeUser
+  block.descentUser = ((font?.descent ?? -200) / 1000) * block.fontSizeUser
+  block.editable = true
+  block.reason = ''
+  if (!block.decodable) {
+    block.editable = false
+    block.reason = 'Some characters of this text have no Unicode mapping in the PDF, so it cannot be edited without changing its meaning.'
+  } else if (COMPLEX_SCRIPT.test(block.text)) {
+    block.editable = false
+    block.reason = 'Hindi and other complex-script text is stored as shaped glyphs in PDFs; editing it is not supported yet.'
+  } else if (!run?.fontResource) {
+    block.editable = false
+    block.reason = 'This text selects its font through a graphics-state resource, which cannot be edited safely yet.'
+  } else if (font?.unsupportedReason) {
+    block.editable = false
+    block.reason = font.unsupportedReason
+  }
+}
+
+function toPublicInspection(analysis, bytes) {
+  const runs = analysis.runs.filter((run) => run.decodable && !run.invisible)
   return {
-    objectNumber,
-    generation,
-    dictionary,
-    body: dictionary,
-    stream: latin1Bytes(source.slice(absoluteStreamStart, streamEnd)),
+    runs,
+    blocks: analysis.blocks,
+    images: analysis.images,
+    fonts: analysis.fonts,
+    pageCount: analysis.pages.length,
+    warnings: analysis.context.warnings,
+    repaired: analysis.index.repaired,
+    sourceBytes: bytes.slice(),
   }
 }
 
-function parseClassicXrefSection(source, offset) {
-  const marker = source.indexOf('trailer', offset)
-  if (marker < 0) throw new Error('Classic PDF xref trailer was not found.')
-  const start = source.indexOf('<<', marker)
-  if (start < 0) throw new Error('PDF trailer dictionary was not found.')
-  const end = findDictionaryEnd(source, start)
-  const trailer = source.slice(start, end)
-  const section = source.slice(offset + 4, marker)
-  const tokens = section.match(/\S+/g) || []
-  const entries = new Map()
-  let cursor = 0
-
-  while (cursor < tokens.length) {
-    const first = Number(tokens[cursor])
-    const count = Number(tokens[cursor + 1])
-    if (!Number.isInteger(first) || !Number.isInteger(count) || count < 0) break
-    cursor += 2
-
-    for (let item = 0; item < count; item += 1) {
-      const byteOffset = Number(tokens[cursor])
-      const generation = Number(tokens[cursor + 1])
-      const flag = tokens[cursor + 2]
-      cursor += 3
-      if (!Number.isInteger(byteOffset) || !Number.isInteger(generation)) continue
-      entries.set(first + item, flag === 'n'
-        ? { type: 1, offset: byteOffset, generation }
-        : { type: 0, nextFreeObject: byteOffset, generation })
-    }
-  }
-
-  return { entries, trailer }
+export async function inspectNativePdfText(bytes) {
+  const analysis = await analyzeDocument(bytes)
+  return toPublicInspection(analysis, bytes)
 }
 
-function parseNumberArray(dictionary, key) {
-  const match = dictionary.match(new RegExp('\\/' + key + '\\s*\\[([^\\]]*)\\]'))
-  if (!match) return null
-  const values = match[1].trim().split(/\s+/).filter(Boolean).map(Number)
-  return values.every(Number.isFinite) ? values : null
+// ---------------------------------------------------------------------------
+// Content-stream emission helpers
+// ---------------------------------------------------------------------------
+
+function hexCode(code, codeBytes) {
+  return code.toString(16).padStart(codeBytes * 2, '0').toUpperCase()
 }
 
-function paethPredictor(left, above, upperLeft) {
-  const prediction = left + above - upperLeft
-  const leftDistance = Math.abs(prediction - left)
-  const aboveDistance = Math.abs(prediction - above)
-  const upperLeftDistance = Math.abs(prediction - upperLeft)
-  if (leftDistance <= aboveDistance && leftDistance <= upperLeftDistance) return left
-  if (aboveDistance <= upperLeftDistance) return above
-  return upperLeft
-}
-
-function applyPngPredictor(bytes, parameters = '') {
-  const predictor = Number(parameters.match(/\/Predictor\s+(\d+)/)?.[1] ?? 1)
-  if (predictor <= 1) return bytes
-  if (predictor === 2) throw new Error('TIFF predictor streams are not supported by native text editing yet.')
-  if (predictor < 10 || predictor > 15) throw new Error('Unsupported PDF stream predictor: ' + predictor)
-
-  const colors = Number(parameters.match(/\/Colors\s+(\d+)/)?.[1] ?? 1)
-  const columns = Number(parameters.match(/\/Columns\s+(\d+)/)?.[1] ?? 1)
-  const bitsPerComponent = Number(parameters.match(/\/BitsPerComponent\s+(\d+)/)?.[1] ?? 8)
-  const rowBytes = Math.ceil((colors * columns * bitsPerComponent) / 8)
-  const bytesPerPixel = Math.max(1, Math.ceil((colors * bitsPerComponent) / 8))
-  if (!rowBytes || !bytesPerPixel) throw new Error('Invalid PNG predictor parameters in PDF stream.')
-
-  const hasFilterByte = bytes.length % (rowBytes + 1) === 0
-  const fixedFilter = predictor === 15 ? null : predictor - 10
-  if (!hasFilterByte && (fixedFilter === null || bytes.length % rowBytes !== 0)) {
-    throw new Error('PNG predictor data has an invalid row length.')
-  }
-
-  const rows = hasFilterByte ? bytes.length / (rowBytes + 1) : bytes.length / rowBytes
-  const output = new Uint8Array(rows * rowBytes)
-  let inputOffset = 0
-  let outputOffset = 0
-  let previous = new Uint8Array(rowBytes)
-
-  for (let rowIndex = 0; rowIndex < rows; rowIndex += 1) {
-    const filter = hasFilterByte ? bytes[inputOffset++] : fixedFilter
-    if (filter < 0 || filter > 4) throw new Error('Unsupported PNG predictor filter: ' + filter)
-    const row = new Uint8Array(rowBytes)
-
-    for (let column = 0; column < rowBytes; column += 1) {
-      const raw = bytes[inputOffset++]
-      const left = column >= bytesPerPixel ? row[column - bytesPerPixel] : 0
-      const above = previous[column] || 0
-      const upperLeft = column >= bytesPerPixel ? previous[column - bytesPerPixel] : 0
-      let value = raw
-      if (filter === 1) value += left
-      else if (filter === 2) value += above
-      else if (filter === 3) value += Math.floor((left + above) / 2)
-      else if (filter === 4) value += paethPredictor(left, above, upperLeft)
-      row[column] = value & 0xff
-    }
-
-    output.set(row, outputOffset)
-    outputOffset += rowBytes
-    previous = row
-  }
-
-  return output
-}
-
-async function decodePdfStream(streamBytes, dictionary) {
-  let decoded = streamBytes
-  const filter = dictionary.match(/\/Filter\s*(\/[^\s/>]+|\[[^\]]*\])/)?.[1] || ''
-  if (!filter) return decoded
-  if (/FlateDecode|\/Fl\b/.test(filter)) decoded = await inflate(decoded)
-  else throw new Error('PDF stream filter ' + filter + ' is not supported by native text editing yet.')
-  const decodeParms = dictionary.match(/\/DecodeParms\s*(<<[\s\S]*?>>|\[[^\]]*\])/)?.[1] || ''
-  if (decodeParms.startsWith('<<')) decoded = applyPngPredictor(decoded, decodeParms)
-  return decoded
-}
-
-async function parseXrefStreamSection(source, bytes, offset) {
-  const object = readIndirectObjectAtOffset(source, offset)
-  if (!/\/Type\s*\/XRef\b/.test(object.dictionary || '') || !object.stream) {
-    throw new Error('The startxref offset does not point to a valid xref stream.')
-  }
-
-  const widths = parseNumberArray(object.dictionary, 'W')
-  if (!widths || widths.length !== 3 || widths.some((width) => !Number.isInteger(width) || width < 0)) {
-    throw new Error('PDF xref stream has an invalid W array.')
-  }
-  const recordWidth = widths.reduce((sum, width) => sum + width, 0)
-  if (!recordWidth) throw new Error('PDF xref stream has an empty W array.')
-  const size = Number(object.dictionary.match(/\/Size\s+(\d+)/)?.[1])
-  if (!Number.isInteger(size) || size < 1) throw new Error('PDF xref stream has an invalid Size value.')
-  const indexRanges = parseNumberArray(object.dictionary, 'Index') || [0, size]
-  if (indexRanges.length % 2 !== 0) throw new Error('PDF xref stream has an invalid Index array.')
-
-  const decoded = await decodePdfStream(object.stream, object.dictionary)
-  const entries = new Map()
-  let byteOffset = 0
-  for (let rangeIndex = 0; rangeIndex < indexRanges.length; rangeIndex += 2) {
-    const firstObject = indexRanges[rangeIndex]
-    const objectCount = indexRanges[rangeIndex + 1]
-    if (!Number.isInteger(firstObject) || !Number.isInteger(objectCount) || firstObject < 0 || objectCount < 0) {
-      throw new Error('PDF xref stream contains an invalid object range.')
-    }
-
-    for (let item = 0; item < objectCount; item += 1) {
-      if (byteOffset + recordWidth > decoded.length) throw new Error('PDF xref stream ended before all entries were read.')
-      const fields = []
-      for (const width of widths) {
-        let value = 0
-        for (let byte = 0; byte < width; byte += 1) value = value * 256 + decoded[byteOffset++]
-        fields.push(width === 0 ? 0 : value)
-      }
-      const type = widths[0] === 0 ? 1 : fields[0]
-      const objectNumber = firstObject + item
-      if (type === 0) {
-        entries.set(objectNumber, { type: 0, nextFreeObject: fields[1], generation: fields[2] })
-      } else if (type === 1) {
-        entries.set(objectNumber, { type: 1, offset: fields[1], generation: fields[2] })
-      } else if (type === 2) {
-        entries.set(objectNumber, { type: 2, objectStreamNumber: fields[1], objectStreamIndex: fields[2], generation: 0 })
-      }
-    }
-  }
-
-  return { entries, trailer: object.dictionary, xrefObjectNumber: object.objectNumber }
-}
-
-async function parseXrefSection(source, bytes, offset) {
-  if (source.slice(offset, offset + 4) === 'xref') {
-    const classic = parseClassicXrefSection(source, offset)
-    const supplementalOffset = Number(classic.trailer.match(/\/XRefStm\s+(\d+)/)?.[1])
-    if (Number.isInteger(supplementalOffset)) {
-      const supplemental = await parseXrefStreamSection(source, bytes, supplementalOffset)
-      for (const [objectNumber, entry] of supplemental.entries) {
-        if (!classic.entries.has(objectNumber) || entry.type === 2) classic.entries.set(objectNumber, entry)
-      }
-    }
-    return classic
-  }
-  return parseXrefStreamSection(source, bytes, offset)
-}
-
-function parseObjectStreamHeader(headerSource, count) {
-  const tokens = headerSource.trim().split(/\s+/).filter(Boolean).map(Number)
-  if (tokens.length < count * 2) throw new Error('PDF object stream header is incomplete.')
-  const objects = []
-  for (let index = 0; index < count; index += 1) {
-    const objectNumber = tokens[index * 2]
-    const relativeOffset = tokens[index * 2 + 1]
-    if (!Number.isInteger(objectNumber) || !Number.isInteger(relativeOffset) || relativeOffset < 0) {
-      throw new Error('PDF object stream contains an invalid object index.')
-    }
-    objects.push({ objectNumber, relativeOffset })
-  }
-  return objects
-}
-
-async function loadCompressedObjects(index, objectStreamNumber) {
-  const cached = index.objectStreamCache.get(objectStreamNumber)
-  if (cached) return cached
-  const streamObject = getPdfObject(index, objectStreamNumber)
-  if (!streamObject.stream || !/\/Type\s*\/ObjStm\b/.test(streamObject.dictionary || '')) {
-    throw new Error('PDF compressed object reference points to an invalid object stream.')
-  }
-  const count = Number(streamObject.dictionary.match(/\/N\s+(\d+)/)?.[1])
-  const first = Number(streamObject.dictionary.match(/\/First\s+(\d+)/)?.[1])
-  if (!Number.isInteger(count) || count < 1 || !Number.isInteger(first) || first < 0) {
-    throw new Error('PDF object stream has invalid N or First values.')
-  }
-  const decoded = await decodePdfStream(streamObject.stream, streamObject.dictionary)
-  const decodedSource = latin1(decoded)
-  if (first > decodedSource.length) throw new Error('PDF object stream First offset is outside the decoded stream.')
-  const objects = parseObjectStreamHeader(decodedSource.slice(0, first), count)
-  const parsed = new Map()
-  for (let indexInStream = 0; indexInStream < objects.length; indexInStream += 1) {
-    const current = objects[indexInStream]
-    const nextOffset = objects[indexInStream + 1]?.relativeOffset ?? (decodedSource.length - first)
-    if (nextOffset < current.relativeOffset) throw new Error('PDF object stream offsets are not ordered.')
-    const body = decodedSource.slice(first + current.relativeOffset, first + nextOffset).trim()
-    let dictionary = null
-    if (body.startsWith('<<')) {
-      const dictionaryEnd = findDictionaryEnd(body, 0)
-      dictionary = body.slice(0, dictionaryEnd)
-    }
-    parsed.set(current.objectNumber, {
-      objectNumber: current.objectNumber,
-      generation: 0,
-      dictionary,
-      body,
-      stream: null,
-      isCompressed: true,
-      objectStreamNumber,
-      objectStreamIndex: indexInStream,
-    })
-  }
-  index.objectStreamCache.set(objectStreamNumber, parsed)
-  return parsed
-}
-
-async function createPdfIndex(bytes) {
-  const source = latin1(bytes)
-  const startXrefMatches = [...source.matchAll(/startxref\s+(\d+)\s+%%EOF/g)]
-  if (!startXrefMatches.length) throw new Error('PDF xref location could not be found.')
-  const latestXref = Number(startXrefMatches.at(-1)[1])
-  const entries = new Map()
-  let currentXref = latestXref
-  let latestTrailer = ''
-  const visitedXrefs = new Set()
-  let first = true
-
-  while (Number.isInteger(currentXref) && currentXref >= 0) {
-    if (visitedXrefs.has(currentXref)) throw new Error('PDF xref /Prev chain contains a loop.')
-    visitedXrefs.add(currentXref)
-    const section = await parseXrefSection(source, bytes, currentXref)
-    if (first) {
-      latestTrailer = section.trailer
-      first = false
-    }
-    for (const [objectNumber, entry] of section.entries) {
-      if (!entries.has(objectNumber)) entries.set(objectNumber, entry)
-    }
-    const previous = section.trailer.match(/\/Prev\s+(\d+)/)
-    if (!previous) break
-    currentXref = Number(previous[1])
-    if (visitedXrefs.size > 64) throw new Error('PDF contains too many incremental xref revisions.')
-  }
-
-  if (/\/Encrypt(?:\s|\d|<|\[)/.test(latestTrailer)) {
-    throw new Error('Encrypted PDFs must be unlocked before native text editing.')
-  }
-  const index = { source, latestXref, entries, trailer: latestTrailer, objectStreamCache: new Map() }
-  const objectStreamNumbers = new Set([...entries.values()]
-    .filter((entry) => entry.type === 2)
-    .map((entry) => entry.objectStreamNumber))
-  for (const objectStreamNumber of objectStreamNumbers) await loadCompressedObjects(index, objectStreamNumber)
-  return index
-}
-
-function getPdfObject(index, objectNumber) {
-  const entry = index.entries.get(objectNumber)
-  if (!entry || entry.type === 0) throw new Error('PDF object ' + objectNumber + ' is missing or free.')
-  if (entry.type === 2) {
-    const objectStream = index.objectStreamCache.get(entry.objectStreamNumber)
-    const object = objectStream?.get(objectNumber)
-    if (!object) throw new Error('Compressed PDF object ' + objectNumber + ' could not be resolved from object stream ' + entry.objectStreamNumber + '.')
-    if (object.objectStreamIndex !== entry.objectStreamIndex) throw new Error('Compressed PDF object ' + objectNumber + ' has an inconsistent object-stream index.')
-    return object
-  }
-  if (entry.type !== 1 || !Number.isInteger(entry.offset)) throw new Error('PDF object ' + objectNumber + ' has an unsupported xref entry type.')
-  const object = readIndirectObjectAtOffset(index.source, entry.offset, index)
-  if (object.objectNumber !== objectNumber) throw new Error('PDF xref entry for object ' + objectNumber + ' points to object ' + object.objectNumber + '.')
-  return object
-}
-
-function sanitizeTrailerForClassicXref(dictionary, size, previousXref) {
-  let trailer = dictionary
-    .replace(/\/Type\s*\/XRef\b/g, '')
-    .replace(/\/W\s*\[[^\]]*\]/g, '')
-    .replace(/\/Index\s*\[[^\]]*\]/g, '')
-    .replace(/\/Length(?!\d)\s+\d+/g, '')
-    .replace(/\/Filter\s*(?:\/[^\s/>]+|\[[^\]]*\])/g, '')
-    .replace(/\/DecodeParms\s*(?:<<[\s\S]*?>>|\[[^\]]*\])/g, '')
-    .replace(/\/Prev\s+\d+/g, '')
-    .replace(/\/Size\s+\d+/g, '')
-  trailer = trailer.replace(/>>\s*$/, '').trim()
-  return trailer + ' /Size ' + size + ' /Prev ' + previousXref + ' >>'
-}
-
-function extractReferences(source) {
-  return [...source.matchAll(/(\d+)\s+(\d+)\s+R/g)].map((match) => ({ objectNumber: Number(match[1]), generation: Number(match[2]) }))
-}
-
-function getPageObjects(index) {
-  const root = index.trailer.match(/\/Root\s+(\d+)\s+\d+\s+R/)
-  if (!root) throw new Error('PDF catalog reference is missing.')
-  const catalog = getPdfObject(index, Number(root[1]))
-  const pagesRef = catalog.dictionary?.match(/\/Pages\s+(\d+)\s+\d+\s+R/)
-  if (!pagesRef) throw new Error('PDF page tree is missing.')
-
-  const pages = []
-  const visit = (objectNumber) => {
-    const object = getPdfObject(index, objectNumber)
-    const dictionary = object.dictionary || ''
-    if (/\/Type\s*\/Page(?!s)/.test(dictionary)) {
-      pages.push({ objectNumber, dictionary })
-      return
-    }
-
-    const kidsMatch = dictionary.match(/\/Kids\s*\[([\s\S]*?)\]/)
-    if (!kidsMatch) return
-    for (const reference of extractReferences(kidsMatch[1])) visit(reference.objectNumber)
-  }
-
-  visit(Number(pagesRef[1]))
-  return pages
-}
-
-async function inflate(bytes) {
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'))
-  return new Uint8Array(await new Response(stream).arrayBuffer())
-}
-
-async function deflate(bytes) {
-  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate'))
-  return new Uint8Array(await new Response(stream).arrayBuffer())
-}
-
-function decodeUtf16BeHex(hex) {
-  const values = hex.match(/.{1,4}/g) || []
-  const units = values.map((part) => Number.parseInt(part.padEnd(4, '0'), 16))
-  let output = ''
-  for (let index = 0; index < units.length; index += 1) {
-    const unit = units[index]
-    if (unit >= 0xd800 && unit <= 0xdbff && units[index + 1] >= 0xdc00 && units[index + 1] <= 0xdfff) {
-      const low = units[++index]
-      output += String.fromCodePoint(0x10000 + ((unit - 0xd800) << 10) + low - 0xdc00)
-    } else {
-      output += String.fromCharCode(unit)
-    }
-  }
-  return output
-}
-
-
-function createWinAnsiMapping() {
-  const decoder = new TextDecoder('windows-1252')
-  const codeToUnicode = new Map()
-  const unicodeToCode = new Map()
-  for (let code = 32; code <= 255; code += 1) {
-    if ([0x7f, 0x81, 0x8d, 0x8f, 0x90, 0x9d].includes(code)) continue
-    const character = decoder.decode(Uint8Array.of(code))
-    if (!character || /[\u0000-\u001f\u007f-\u009f]/.test(character)) continue
-    codeToUnicode.set(code, character)
-    if (!unicodeToCode.has(character)) unicodeToCode.set(character, code)
-  }
-  return { codeToUnicode, unicodeToCode }
-}
-
-function parseSimpleFontWidths(index, fontDictionary) {
-  const firstChar = Number(fontDictionary.match(/\/FirstChar\s+(\d+)/)?.[1] ?? 0)
-  const lastChar = Number(fontDictionary.match(/\/LastChar\s+(\d+)/)?.[1] ?? 255)
-  const widths = new Map()
-  const widthsMatch = fontDictionary.match(/\/Widths\s*\[([^\]]*)\]/)
-  if (widthsMatch) {
-    const values = widthsMatch[1].match(/-?\d+(?:\.\d+)?/g) || []
-    values.forEach((value, offset) => {
-      const code = firstChar + offset
-      if (code <= lastChar) widths.set(code, Number(value))
-    })
-  }
-  const descriptorReference = fontDictionary.match(/\/FontDescriptor\s+(\d+)\s+\d+\s+R/)
-  const descriptor = descriptorReference ? getPdfObject(index, Number(descriptorReference[1])) : null
-  const defaultWidth = Number(descriptor?.dictionary?.match(/\/MissingWidth\s+(-?\d+(?:\.\d+)?)/)?.[1] ?? 500)
-  const supportedCodes = new Set([...widths].filter(([, width]) => width > 0).map(([code]) => code))
-  return { widths, defaultWidth, firstChar, lastChar, supportedCodes, hasExplicitWidths: Boolean(widthsMatch) }
-}
-
-function parseToUnicodeCMap(source) {
-  const codeToUnicode = new Map()
-  const lines = source.split(/\r?\n/)
-  let section = ''
-
-  for (const line of lines) {
-    const countMatch = line.match(/^\s*\d+\s+begin(bfchar|bfrange)\s*$/)
-    if (countMatch) {
-      section = countMatch[1]
+/** Serialise [{code}|{adjust}] elements as the inside of a TJ array. */
+function elementsToTJ(elements, codeBytes) {
+  const parts = []
+  let hex = ''
+  for (const element of elements) {
+    if (element.code !== undefined) {
+      hex += hexCode(element.code, codeBytes)
       continue
     }
-    if (/endbfchar|endbfrange/.test(line)) {
-      section = ''
-      continue
-    }
-    if (!section) continue
-
-    if (section === 'bfchar') {
-      const pair = line.match(/<([\da-fA-F]+)>\s*<([\da-fA-F]+)>/)
-      if (pair) codeToUnicode.set(Number.parseInt(pair[1], 16), decodeUtf16BeHex(pair[2]))
-      continue
-    }
-
-    const range = line.match(/<([\da-fA-F]+)>\s*<([\da-fA-F]+)>\s*(<([\da-fA-F]+)>|\[([^\]]*)\])/)
-    if (!range) continue
-    const start = Number.parseInt(range[1], 16)
-    const end = Number.parseInt(range[2], 16)
-    if (range[4]) {
-      const startUnicode = Number.parseInt(range[4], 16)
-      for (let code = start; code <= end; code += 1) {
-        codeToUnicode.set(code, String.fromCodePoint(startUnicode + code - start))
-      }
-    } else if (range[5]) {
-      const destinations = [...range[5].matchAll(/<([\da-fA-F]+)>/g)]
-      for (let offset = 0; offset < destinations.length && start + offset <= end; offset += 1) {
-        codeToUnicode.set(start + offset, decodeUtf16BeHex(destinations[offset][1]))
-      }
-    }
+    if (hex) { parts.push(`<${hex}>`); hex = '' }
+    if (Math.abs(element.adjust) > 0.0005) parts.push(formatPdfNumber(Number(element.adjust.toFixed(3))))
   }
+  if (hex) parts.push(`<${hex}>`)
+  return parts.join(' ')
+}
 
-  const unicodeToCode = new Map()
-  for (const [code, text] of codeToUnicode) {
-    if (text && !unicodeToCode.has(text)) unicodeToCode.set(text, code)
+function showPrefix(run) {
+  if (run.operator === "'") return 'T* '
+  if (run.operator === '"') {
+    const [aw, ac] = run.extraOperands || [run.wordSpacing, run.characterSpacing]
+    return `${formatPdfNumber(aw)} Tw ${formatPdfNumber(ac)} Tc T* `
   }
-  return { codeToUnicode, unicodeToCode }
-}
-
-function parseCidWidths(index, type0FontDictionary) {
-  const descendantReference = type0FontDictionary.match(/\/DescendantFonts\s*\[\s*(\d+)\s+\d+\s+R/)
-  if (!descendantReference) return { widths: new Map(), defaultWidth: 1000 }
-  const descendant = getPdfObject(index, Number(descendantReference[1]))
-  const dictionary = descendant.dictionary || ''
-  const defaultWidth = Number(dictionary.match(/\/DW\s+(-?\d+(?:\.\d+)?)/)?.[1] ?? 1000)
-  const widths = new Map()
-  const marker = dictionary.indexOf('/W')
-  if (marker < 0) return { widths, defaultWidth }
-  const start = dictionary.indexOf('[', marker)
-  if (start < 0) return { widths, defaultWidth }
-  let depth = 0
-  let end = -1
-  for (let index = start; index < dictionary.length; index += 1) {
-    if (dictionary[index] === '[') depth += 1
-    else if (dictionary[index] === ']') {
-      depth -= 1
-      if (depth === 0) { end = index; break }
-    }
-  }
-  if (end < 0) return { widths, defaultWidth }
-  const tokens = dictionary.slice(start + 1, end).match(/\[|\]|-?\d+(?:\.\d+)?/g) || []
-  let cursor = 0
-  while (cursor < tokens.length) {
-    const firstCid = Number(tokens[cursor++])
-    if (!Number.isInteger(firstCid)) break
-    if (tokens[cursor] === '[') {
-      cursor += 1
-      let code = firstCid
-      while (cursor < tokens.length && tokens[cursor] !== ']') {
-        const width = Number(tokens[cursor++])
-        if (Number.isFinite(width)) widths.set(code++, width)
-      }
-      cursor += 1
-    } else {
-      const lastCid = Number(tokens[cursor++])
-      const width = Number(tokens[cursor++])
-      if (!Number.isInteger(lastCid) || !Number.isFinite(width)) break
-      for (let code = firstCid; code <= lastCid; code += 1) widths.set(code, width)
-    }
-  }
-  return { widths, defaultWidth }
-}
-
-function identityHCodeUnits(bytes) {
-  if (bytes.length % 2 !== 0) throw new Error('An Identity-H text string has an invalid byte length.')
-  const codes = []
-  for (let offset = 0; offset < bytes.length; offset += 2) codes.push((bytes[offset] << 8) | bytes[offset + 1])
-  return codes
-}
-
-function fontCodeUnits(bytes, font) {
-  if (font.isComposite) return identityHCodeUnits(bytes)
-  return [...bytes]
-}
-
-function pdfNumber(value) {
-  return Number(value.toFixed(4)).toString()
-}
-
-function getFontDescriptor(index, fontObject) {
-  const descendantReference = fontObject.dictionary?.match(/\/DescendantFonts\s*\[\s*(\d+)\s+\d+\s+R/)
-  const descendant = descendantReference ? getPdfObject(index, Number(descendantReference[1])) : null
-  const descriptorReference = (descendant?.dictionary || fontObject.dictionary || '').match(/\/FontDescriptor\s+(\d+)\s+\d+\s+R/)
-  const descriptor = descriptorReference ? getPdfObject(index, Number(descriptorReference[1])) : null
-  return { descendant, descriptor, dictionary: descriptor?.dictionary || '' }
-}
-
-function readFontMetadata(index, resourceName, fontObject, mapping, metrics, isComposite) {
-  const dictionary = fontObject.dictionary || ''
-  const { descendant, descriptor, dictionary: descriptorDictionary } = getFontDescriptor(index, fontObject)
-  const baseFontName = dictionary.match(/\/BaseFont\s*\/([^\s/<>()]+)/)?.[1] || ''
-  const descriptorFontName = descriptorDictionary.match(/\/FontName\s*\/([^\s/<>()]+)/)?.[1] || ''
-  const subtype = dictionary.match(/\/Subtype\s*\/([^\s/<>()]+)/)?.[1] || 'Unknown'
-  const encoding = dictionary.match(/\/Encoding\s*\/([^\s/<>()]+)/)?.[1] || 'Custom/Unknown'
-  const flags = Number(descriptorDictionary.match(/\/Flags\s+(\d+)/)?.[1] || 0)
-  const weightValue = Number(descriptorDictionary.match(/\/FontWeight\s+(\d+)/)?.[1] || 0)
-  const fontFileMatch = descriptorDictionary.match(/\/(FontFile3|FontFile2|FontFile)\s+(\d+)\s+\d+\s+R/)
-  const embedded = Boolean(fontFileMatch)
-  const isSubset = /^[A-Z]{6}\+/.test(baseFontName)
-  const fontFamily = (descriptorFontName || baseFontName).replace(/^[A-Z]{6}\+/, '')
-  const italic = Boolean(flags & 64) || /italic|oblique/i.test(fontFamily)
-  const bold = Boolean(flags & 262144) || weightValue >= 600 || /bold|black|heavy|semibold/i.test(fontFamily)
-  const unicodeMapEntries = mapping.codeToUnicode.size
-  const hasToUnicode = unicodeMapEntries > 0
-  const identityH = encoding === 'Identity-H'
-  const winAnsi = encoding === 'WinAnsiEncoding'
-  const supportedCharacters = [...mapping.unicodeToCode.entries()]
-    .filter(([, code]) => !embedded || identityH || !metrics.supportedCodes || metrics.supportedCodes.has(code))
-    .map(([character]) => character)
-  const canNativeReplace = (identityH && hasToUnicode && mapping.unicodeToCode.size > 0)
-    || (winAnsi && mapping.unicodeToCode.size > 0 && supportedCharacters.length > 0)
-  const limitations = []
-  if (!identityH && !winAnsi) limitations.push('Encoding ' + encoding + ' is not supported by the current native replacement path.')
-  if (!hasToUnicode && !winAnsi) limitations.push('The font does not expose a readable ToUnicode character map.')
-  if (!embedded) limitations.push('The font program is not embedded; the viewer font substitute may affect visual matching.')
-  if (isSubset) limitations.push('This is a subset font; only characters present in the embedded subset can be reused.')
-
-  return {
-    id: String(fontObject.objectNumber) + ':' + resourceName,
-    resourceName,
-    fontObjectNumber: fontObject.objectNumber,
-    descendantFontObjectNumber: descendant?.objectNumber ?? null,
-    descriptorObjectNumber: descriptor?.objectNumber ?? null,
-    baseFontName,
-    descriptorFontName,
-    fontFamily,
-    subtype,
-    encoding,
-    fontFlags: flags,
-    fontWeight: weightValue || (bold ? 700 : 400),
-    fontStyle: italic ? 'italic' : 'normal',
-    isBold: bold,
-    isItalic: italic,
-    isSubset,
-    isEmbedded: embedded,
-    embeddedFontProgram: fontFileMatch?.[1] || null,
-    hasToUnicode,
-    unicodeMapEntries,
-    supportedCharacterCount: supportedCharacters.length,
-    supportedCharacters,
-    widthMetricCount: metrics.widths.size,
-    defaultWidth: metrics.defaultWidth,
-    canNativeReplace,
-    canPreserveEmbeddedFont: embedded && canNativeReplace,
-    limitations,
-  }
-}
-
-async function parseFontMaps(index, resourcesDictionary) {
-  const fontDictionaryStart = resourcesDictionary.indexOf('/Font')
-  if (fontDictionaryStart < 0) return new Map()
-  const open = resourcesDictionary.indexOf('<<', fontDictionaryStart)
-  if (open < 0) return new Map()
-  const end = findDictionaryEnd(resourcesDictionary, open)
-  const fontDictionary = resourcesDictionary.slice(open, end)
-  const fonts = new Map()
-
-  for (const match of fontDictionary.matchAll(/\/([A-Za-z0-9_.+-]+)\s+(\d+)\s+\d+\s+R/g)) {
-    const resourceName = match[1]
-    const fontObject = getPdfObject(index, Number(match[2]))
-    const fontObjectDictionary = fontObject.dictionary || ''
-    const toUnicodeRef = fontObjectDictionary.match(/\/ToUnicode\s+(\d+)\s+\d+\s+R/)
-    const encoding = fontObjectDictionary.match(/\/Encoding\s*\/([^\s/<>()]+)/)?.[1] || 'Custom/Unknown'
-    const identityH = encoding === 'Identity-H'
-    const winAnsi = encoding === 'WinAnsiEncoding'
-    let mapping = { codeToUnicode: new Map(), unicodeToCode: new Map() }
-    if (toUnicodeRef) {
-      const cmapObject = getPdfObject(index, Number(toUnicodeRef[1]))
-      if (cmapObject.stream) {
-        const cmapBytes = await decodePdfStream(cmapObject.stream, cmapObject.dictionary || '')
-        mapping = parseToUnicodeCMap(latin1(cmapBytes))
-      }
-    }
-    if (winAnsi && mapping.unicodeToCode.size === 0) mapping = createWinAnsiMapping()
-    const metrics = identityH
-      ? parseCidWidths(index, fontObjectDictionary)
-      : winAnsi
-        ? parseSimpleFontWidths(index, fontObjectDictionary)
-        : { widths: new Map(), defaultWidth: 1000, supportedCodes: null }
-    const metadata = readFontMetadata(index, resourceName, fontObject, mapping, metrics, identityH)
-    fonts.set(resourceName, {
-      ...mapping,
-      ...metrics,
-      fontObjectNumber: fontObject.objectNumber,
-      encoding,
-      isComposite: identityH,
-      codeBytes: identityH ? 2 : 1,
-      metadata,
-    })
-  }
-  return fonts
-}
-
-function readLiteralString(source, start) {
-  let index = start + 1
-  let depth = 1
-  const bytes = []
-  while (index < source.length && depth > 0) {
-    const char = source[index]
-    if (char === '\\') {
-      index += 1
-      if (index >= source.length) break
-      const escaped = source[index]
-      const simple = { n: 10, r: 13, t: 9, b: 8, f: 12, '(': 40, ')': 41, '\\': 92 }
-      if (Object.hasOwn(simple, escaped)) bytes.push(simple[escaped])
-      else if (/[0-7]/.test(escaped)) {
-        let octal = escaped
-        for (let count = 0; count < 2 && /[0-7]/.test(source[index + 1] || ''); count += 1) octal += source[++index]
-        bytes.push(Number.parseInt(octal, 8) & 0xff)
-      } else if (escaped === '\r' || escaped === '\n') {
-        if (escaped === '\r' && source[index + 1] === '\n') index += 1
-      } else bytes.push(escaped.charCodeAt(0) & 0xff)
-      index += 1
-      continue
-    }
-    if (char === '(') {
-      depth += 1
-      bytes.push(40)
-      index += 1
-      continue
-    }
-    if (char === ')') {
-      depth -= 1
-      index += 1
-      if (depth > 0) bytes.push(41)
-      continue
-    }
-    bytes.push(char.charCodeAt(0) & 0xff)
-    index += 1
-  }
-  if (depth !== 0) throw new Error('Malformed PDF text string.')
-  return { type: 'string', start, end: index, bytes: Uint8Array.from(bytes) }
-}
-
-function tokenizeContent(bytes) {
-  const source = latin1(bytes)
-  const tokens = []
-  let index = 0
-  const delimiters = new Set(['(', ')', '<', '>', '[', ']', '{', '}', '/', '%'])
-
-  while (index < source.length) {
-    const char = source[index]
-    if (/\s/.test(char)) { index += 1; continue }
-    if (char === '%') {
-      while (index < source.length && source[index] !== '\n' && source[index] !== '\r') index += 1
-      continue
-    }
-    if (char === '(') {
-      const token = readLiteralString(source, index)
-      tokens.push(token)
-      index = token.end
-      continue
-    }
-    if (char === '<' && source[index + 1] !== '<') {
-      const end = source.indexOf('>', index + 1)
-      if (end < 0) throw new Error('Malformed PDF hexadecimal string.')
-      const hex = source.slice(index + 1, end).replace(/\s+/g, '')
-      const padded = hex.length % 2 ? `${hex}0` : hex
-      const data = new Uint8Array(padded.length / 2)
-      for (let offset = 0; offset < padded.length; offset += 2) data[offset / 2] = Number.parseInt(padded.slice(offset, offset + 2), 16)
-      tokens.push({ type: 'hex', start: index, end: end + 1, bytes: data })
-      index = end + 1
-      continue
-    }
-    if (char === '[') { tokens.push({ type: 'arrayStart', start: index, end: index + 1 }); index += 1; continue }
-    if (char === ']') { tokens.push({ type: 'arrayEnd', start: index, end: index + 1 }); index += 1; continue }
-    if (char === '<' && source[index + 1] === '<') {
-      const end = findDictionaryEnd(source, index)
-      tokens.push({ type: 'composite', start: index, end })
-      index = end
-      continue
-    }
-    if (char === '/' ) {
-      const start = index++
-      while (index < source.length && !/\s/.test(source[index]) && !delimiters.has(source[index])) index += 1
-      tokens.push({ type: 'name', value: source.slice(start + 1, index), start, end: index })
-      continue
-    }
-
-    const start = index
-    while (index < source.length && !/\s/.test(source[index]) && !delimiters.has(source[index])) index += 1
-    if (index === start) { index += 1; continue }
-    const value = source.slice(start, index)
-    tokens.push({ type: /^[-+]?\d*\.?\d+$/.test(value) ? 'number' : 'word', value, start, end: index })
-  }
-  return tokens
-}
-
-function decodeFontText(bytes, font) {
-  if (font.isComposite && bytes.length % 2 !== 0) return ''
-  let output = ''
-  for (const code of fontCodeUnits(bytes, font)) output += font.codeToUnicode.get(code) ?? '\uFFFD'
-  return output
-}
-
-function extractFontResourceDictionary(pageDictionary, index) {
-  const direct = pageDictionary.match(/\/Resources\s*(<<)/)
-  if (direct) {
-    const start = pageDictionary.indexOf('<<', direct.index)
-    const end = findDictionaryEnd(pageDictionary, start)
-    return pageDictionary.slice(start, end)
-  }
-  const resourceRef = pageDictionary.match(/\/Resources\s+(\d+)\s+\d+\s+R/)
-  if (resourceRef) return getPdfObject(index, Number(resourceRef[1])).dictionary || ''
   return ''
 }
 
-function pageContentRefs(pageDictionary) {
-  const contents = pageDictionary.match(/\/Contents\s+(\d+)\s+\d+\s+R/)
-  if (contents) return [Number(contents[1])]
-  const array = pageDictionary.match(/\/Contents\s*\[([\s\S]*?)\]/)
-  if (array) return extractReferences(array[1]).map((reference) => reference.objectNumber)
-  return []
+const originalElements = (glyphs) => glyphs.map((glyph) => (glyph.code !== undefined ? { code: glyph.code } : { adjust: glyph.adjust }))
+
+function textSpaceUnitsToAdjust(units, run) {
+  const scale = run.fontSize * (run.horizontalScaling / 100)
+  return scale ? (-units * 1000) / scale : 0
 }
 
-function previousNumericOperands(tokens, operatorIndex, count) {
-  const values = []
-  for (let cursor = operatorIndex - 1; cursor >= 0 && values.length < count; cursor -= 1) {
-    if (tokens[cursor].type !== 'number') break
-    values.unshift(Number(tokens[cursor].value))
+function adjustToTextSpace(adjust, run) {
+  return (-adjust / 1000) * run.fontSize * (run.horizontalScaling / 100)
+}
+
+function averageVirtualSpace(blockRuns) {
+  const values = blockRuns.flatMap((run) => run.glyphs.filter((glyph) => glyph.virtualSpace).map((glyph) => glyph.adjust))
+  if (!values.length) return -250
+  return values.reduce((sum, value) => sum + value, 0) / values.length
+}
+
+// ---------------------------------------------------------------------------
+// Editing
+// ---------------------------------------------------------------------------
+
+function codePoints(value) {
+  return [...value]
+}
+
+function computeDiff(oldChars, newText) {
+  const oldPoints = oldChars.map((item) => item.ch)
+  const newPoints = codePoints(newText)
+  let prefix = 0
+  while (prefix < oldPoints.length && prefix < newPoints.length && oldPoints[prefix] === newPoints[prefix]) prefix += 1
+  let suffix = 0
+  while (
+    suffix < oldPoints.length - prefix && suffix < newPoints.length - prefix &&
+    oldPoints[oldPoints.length - 1 - suffix] === newPoints[newPoints.length - 1 - suffix]
+  ) suffix += 1
+  const sameItem = (a, b) => a && b && a.kind === 'glyph' && b.kind === 'glyph' && a.run === b.run && a.item === b.item
+  // Never split a ligature glyph (one code drawing several characters).
+  while (prefix > 0 && prefix < oldChars.length && sameItem(oldChars[prefix], oldChars[prefix - 1])) prefix -= 1
+  let suffixStart = oldChars.length - suffix
+  while (suffix > 0 && suffixStart > 0 && sameItem(oldChars[suffixStart], oldChars[suffixStart - 1])) { suffix -= 1; suffixStart += 1 }
+  return { prefix, suffix, middle: newPoints.slice(prefix, newPoints.length - suffix).join('') }
+}
+
+/**
+ * Plan the content-stream rewrite for one block. Returns the stream edits, the
+ * along-line width change (delta, user space) and the old/new extent.
+ */
+function planBlockRewrite({ block, blockRuns, font, newText, fallback, fallbackResourceName }) {
+  const chars = block.chars
+  let { prefix, suffix, middle } = computeDiff(chars, newText)
+  if (fallback) { prefix = 0; suffix = 0; middle = newText }
+  const lastRun = blockRuns.length - 1
+
+  let firstRun
+  let prefixEnd
+  if (prefix < chars.length) {
+    const item = chars[prefix]
+    firstRun = item.run
+    prefixEnd = item.kind === 'gap' ? blockRuns[item.run].glyphs.length : item.item
+  } else {
+    firstRun = lastRun
+    prefixEnd = blockRuns[lastRun].glyphs.length
   }
-  return values.length === count ? values : null
-}
-
-function colorChannel(value) {
-  return Math.max(0, Math.min(255, Math.round(Number(value) * 255)))
-}
-
-function toHexColor(red, green, blue) {
-  return '#' + [red, green, blue].map((value) => colorChannel(value).toString(16).padStart(2, '0')).join('').toUpperCase()
-}
-
-function readPdfColor(tokens, operatorIndex, operator) {
-  if (operator === 'g' || operator === 'G') {
-    const [gray] = previousNumericOperands(tokens, operatorIndex, 1) || []
-    return Number.isFinite(gray) ? toHexColor(gray, gray, gray) : null
+  let endRun
+  let suffixStart
+  let suffixGap = 0
+  if (suffix > 0) {
+    const item = chars[chars.length - suffix]
+    if (item.kind === 'gap') { endRun = item.run + 1; suffixStart = 0; suffixGap = item.gap }
+    else { endRun = item.run; suffixStart = item.item }
+  } else {
+    endRun = Math.max(firstRun, prefix < chars.length ? chars[chars.length - 1].run : lastRun)
+    suffixStart = blockRuns[endRun].glyphs.length
   }
-  if (operator === 'rg' || operator === 'RG') {
-    const components = previousNumericOperands(tokens, operatorIndex, 3)
-    return components ? toHexColor(...components) : null
+  if (endRun < firstRun) { endRun = firstRun; suffixStart = prefixEnd }
+
+  const target = blockRuns[firstRun]
+  const horizontal = target.horizontalScaling / 100
+  const elements = []
+  let advance = 0
+  const pushOriginal = (glyphs) => {
+    for (const glyph of glyphs) {
+      if (glyph.code !== undefined) {
+        elements.push({ code: glyph.code, font: 'original' })
+        advance += glyph.advance
+      } else {
+        elements.push({ adjust: glyph.adjust })
+        advance += adjustToTextSpace(glyph.adjust, target)
+      }
+    }
   }
-  if (operator === 'k' || operator === 'K') {
-    const components = previousNumericOperands(tokens, operatorIndex, 4)
-    if (!components) return null
-    const [cyan, magenta, yellow, black] = components
-    return toHexColor(1 - Math.min(1, cyan + black), 1 - Math.min(1, magenta + black), 1 - Math.min(1, yellow + black))
+  pushOriginal(target.glyphs.slice(0, prefixEnd))
+
+  // Middle (new) text.
+  const spaceAdjust = averageVirtualSpace(blockRuns)
+  if (fallback) {
+    for (const glyph of fallback.encoder.encode(middle)) {
+      elements.push({ code: glyph.code, font: 'fallback' })
+      const isOneByteSpace = fallback.encoder.codeBytes === 1 && glyph.code === 32
+      advance += ((glyph.width / 1000) * target.fontSize + target.characterSpacing + (isOneByteSpace ? target.wordSpacing : 0)) * horizontal
+      let extra = glyph.kern ? -glyph.kern : 0
+      if (glyph.isSpace && fallback.encoder.codeBytes === 2 && target.wordSpacing && target.fontSize) {
+        extra += (-target.wordSpacing * 1000) / target.fontSize
+      }
+      if (extra) {
+        elements.push({ adjust: extra })
+        advance += adjustToTextSpace(extra, target)
+      }
+    }
+  } else {
+    for (const character of middle) {
+      const isWhitespace = /\s/.test(character)
+      const code = font.encodeCharacter(isWhitespace ? ' ' : character)
+      if (code === null || code === undefined) {
+        if (!isWhitespace) throw new Error(`The font cannot draw “${character}”.`)
+        elements.push({ adjust: spaceAdjust })
+        advance += adjustToTextSpace(spaceAdjust, target)
+        continue
+      }
+      elements.push({ code, font: 'original' })
+      const isSpace = font.codeBytes === 1 && code === 32
+      advance += (font.widthOf(code) * target.fontSize + target.characterSpacing + (isSpace ? target.wordSpacing : 0)) * horizontal
+    }
+  }
+
+  // Suffix.
+  if (endRun !== firstRun) {
+    if (suffixGap > 0) {
+      const adjust = textSpaceUnitsToAdjust(suffixGap / target.scaleX, target)
+      elements.push({ adjust })
+      advance += suffixGap / target.scaleX
+    }
+    pushOriginal(blockRuns[endRun].glyphs.slice(suffixStart))
+  } else {
+    pushOriginal(target.glyphs.slice(suffixStart))
+  }
+
+  // Keep the operator's original advance so absolutely positioned content
+  // after it is untouched; following text is moved explicitly instead.
+  const keepAdvance = textSpaceUnitsToAdjust(target.advance - advance, target)
+  const finalElements = [...elements, { adjust: keepAdvance }]
+
+  let operatorText
+  if (fallback) {
+    const glyphElements = finalElements.map((element) => (element.code !== undefined ? { code: element.code } : element))
+    operatorText = `${showPrefix(target)}/${fallbackResourceName} ${formatPdfNumber(target.fontSize)} Tf [${elementsToTJ(glyphElements, fallback.encoder.codeBytes)}] TJ /${target.fontResource} ${formatPdfNumber(target.fontSize)} Tf`
+  } else {
+    operatorText = `${showPrefix(target)}[${elementsToTJ(finalElements, font.codeBytes)}] TJ`
+  }
+
+  const edits = [{ run: target, text: operatorText }]
+  for (let runIndex = firstRun + 1; runIndex <= endRun; runIndex += 1) {
+    const run = blockRuns[runIndex]
+    const adjust = textSpaceUnitsToAdjust(run.advance, run)
+    const blank = Math.abs(adjust) > 0.0005 ? `[${formatPdfNumber(Number(adjust.toFixed(3)))}] TJ` : ''
+    edits.push({ run, text: `${showPrefix(run)}${blank}`.trim() || ' ' })
+  }
+
+  const direction = block.direction
+  const newEnd = dot(target.originPoint, direction) + advance * target.scaleX
+  const oldEnd = dot(blockRuns[endRun].advanceEndPoint, direction)
+  return { edits, delta: newEnd - oldEnd, oldEnd, newEnd, endRun, firstRun }
+}
+
+function buildShiftEdits({ analysis, block, blockRunKeys, excludedKeys, oldEnd, delta, codeBytesFor }) {
+  if (Math.abs(delta) < 0.01) return { edits: [], warnings: [] }
+  const warnings = []
+  const direction = block.direction
+  const size = block.fontSizeUser
+  const blockStart = dot(block.startPoint, direction)
+  const baseline = dot(block.startPoint, block.normal)
+  const angle = block.angle
+  const pageRuns = analysis.runs.filter((run) => run.pageIndex === block.pageIndex && run.glyphs.length)
+  const onLine = pageRuns.filter((run) => (
+    !excludedKeys.has(run.key) &&
+    Math.abs(runAngle(run) - angle) <= 1 &&
+    Math.abs(dot(run.startPoint, block.normal) - baseline) <= Math.max(0.5, 0.3 * size)
+  ))
+  const candidates = onLine
+    .map((run) => ({ run, ...runAlong(run, direction) }))
+    .filter((item) => item.start >= blockStart - 0.3 * size && (blockRunKeys.has(item.run.key) || item.start >= oldEnd - 0.5 * size))
+    .sort((a, b) => a.start - b.start)
+
+  const rules = analysis.rules.get(block.pageIndex) || []
+  const line = { direction, normal: block.normal, baseline, size }
+  const chain = new Set()
+  let lastEnd = oldEnd
+  let nextOutside = null
+  for (const item of candidates) {
+    // Stop at wide gaps and at painted rules (table borders, box edges): text
+    // in the next column or cell keeps its position.
+    if (item.start - lastEnd > 1.0 * size || hasSeparatorBetween(rules, line, lastEnd, item.start)) { nextOutside = item; break }
+    chain.add(item.run.key)
+    lastEnd = Math.max(lastEnd, item.end)
+  }
+  let boundary = nextOutside ? nextOutside.start : Infinity
+  for (const rule of rules) {
+    const a1 = rule.x1 * direction.x + rule.y1 * direction.y
+    const a2 = rule.x2 * direction.x + rule.y2 * direction.y
+    if (Math.abs(a1 - a2) > 0.75 || a1 <= lastEnd - 0.25 || a1 >= boundary) continue
+    const c1 = rule.x1 * block.normal.x + rule.y1 * block.normal.y
+    const c2 = rule.x2 * block.normal.x + rule.y2 * block.normal.y
+    if (Math.min(c1, c2) <= baseline + 0.6 * size && Math.max(c1, c2) >= baseline - 0.1 * size) boundary = a1
+  }
+  if (delta > 0 && lastEnd + delta > boundary - 0.05 * size) {
+    warnings.push('The edited text is now wider than the space available and may cross a table border or the next column.')
+  } else if (delta > 0 && !Number.isFinite(boundary)) {
+    // Right margin of the surrounding text: the furthest line end on this page.
+    let margin = -Infinity
+    for (const run of pageRuns) {
+      if (Math.abs(runAngle(run) - angle) > 1 || Math.abs(dot(run.startPoint, block.normal) - baseline) <= 0.3 * size) continue
+      margin = Math.max(margin, dot(run.endPoint, direction))
+    }
+    if (Number.isFinite(margin) && lastEnd <= margin + 0.5 && lastEnd + delta > margin + 0.5) {
+      warnings.push('This line is now longer than the paragraph and extends past its right margin. Shorten the text or edit the next line too.')
+    }
+  }
+
+  const moved = new Set()
+  const edits = []
+  const ordered = [...pageRuns].sort((a, b) => a.sequence - b.sequence)
+  for (const run of ordered) {
+    if (excludedKeys.has(run.key)) continue
+    const previousMoved = run.positioning === 'continuation' && run.previousRunKey && moved.has(run.previousRunKey)
+    if (chain.has(run.key)) {
+      if (previousMoved) { moved.add(run.key); continue }
+      edits.push(shiftEdit(run, delta, codeBytesFor(run)))
+      moved.add(run.key)
+    } else if (previousMoved) {
+      // Continuation text that is not part of the chain keeps its position.
+      edits.push(shiftEdit(run, -delta, codeBytesFor(run)))
+    }
+  }
+  return { edits, warnings }
+}
+
+function shiftEdit(run, deltaUser, codeBytes) {
+  const shift = textSpaceUnitsToAdjust(deltaUser / run.scaleX, run)
+  const elements = [{ adjust: shift }, ...originalElements(run.glyphs)]
+  return { run, text: `${showPrefix(run)}[${elementsToTJ(elements, codeBytes)}] TJ` }
+}
+
+function cloneDict(dict) {
+  return new PdfDict(dict instanceof Map ? dict : [])
+}
+
+/** Adds a font to the resource dictionary used by a content stream. */
+class ResourceUpdater {
+  constructor(index, analysis) {
+    this.index = index
+    this.analysis = analysis
+    this.updates = new Map()
+    this.xobjectResources = new Map()
+  }
+
+  currentValue(num) {
+    return this.updates.get(num)?.value ?? this.index.getObject(num)?.value
+  }
+
+  setObject(num, value) {
+    const gen = this.index.getObject(num)?.gen ?? 0
+    const existing = this.updates.get(num)
+    this.updates.set(num, { num, gen, value, stream: existing?.stream })
+  }
+
+  withResource(resources, category, resourceName, value) {
+    const updated = cloneDict(resources)
+    const entry = updated.get(category)
+    if (entry instanceof PdfRef) {
+      const dict = cloneDict(this.currentValue(entry.num))
+      dict.set(resourceName, value)
+      this.setObject(entry.num, dict)
+      return { dict: updated, changed: false }
+    }
+    const dict = cloneDict(this.index.resolve(entry))
+    dict.set(resourceName, value)
+    updated.set(category, dict)
+    return { dict: updated, changed: true }
+  }
+
+  existingNames(resources, category) {
+    const entry = resources?.get?.(category)
+    const dict = entry instanceof PdfRef ? this.currentValue(entry.num) : entry
+    return new Set(dict instanceof Map ? dict.keys() : [])
+  }
+
+  uniqueName(resources, category = 'Font', prefix = 'EF') {
+    const names = this.existingNames(resources, category)
+    let counter = 1
+    while (names.has(`${prefix}${counter}`)) counter += 1
+    return `${prefix}${counter}`
+  }
+
+  /** Returns the resource name under which `value` is available to the stream. */
+  addResource(stream, category, value, prefix) {
+    const owner = stream.owner
+    if (owner.kind === 'xobject') {
+      const xobject = this.index.getObject(owner.num)
+      const resourcesValue = xobject.value.get('Resources')
+      if (resourcesValue instanceof PdfRef) {
+        const resources = this.currentValue(resourcesValue.num)
+        const resourceName = this.uniqueName(resources, category, prefix)
+        const { dict, changed } = this.withResource(resources, category, resourceName, value)
+        if (changed) this.setObject(resourcesValue.num, dict)
+        return resourceName
+      }
+      const resources = this.xobjectResources.get(owner.num) || this.index.resolve(resourcesValue) || stream.resources
+      const resourceName = this.uniqueName(resources, category, prefix)
+      const { dict } = this.withResource(resources, category, resourceName, value)
+      this.xobjectResources.set(owner.num, dict)
+      return resourceName
+    }
+    const page = this.analysis.pages.find((item) => item.num === owner.pageNum)
+    const pageDict = this.currentValue(page.num)
+    const resourcesValue = pageDict.get('Resources')
+    if (resourcesValue instanceof PdfRef) {
+      const resources = this.currentValue(resourcesValue.num)
+      const resourceName = this.uniqueName(resources, category, prefix)
+      const { dict, changed } = this.withResource(resources, category, resourceName, value)
+      if (changed) this.setObject(resourcesValue.num, dict)
+      return resourceName
+    }
+    const resources = resourcesValue instanceof PdfDict ? resourcesValue : this.index.resolve(page.inherited.Resources?.value) || new PdfDict()
+    const resourceName = this.uniqueName(resources, category, prefix)
+    const { dict } = this.withResource(resources, category, resourceName, value)
+    const updatedPage = cloneDict(pageDict)
+    updatedPage.set('Resources', dict)
+    this.setObject(page.num, updatedPage)
+    return resourceName
+  }
+
+  addFont(stream, fontRef) {
+    return this.addResource(stream, 'Font', fontRef, 'EF')
+  }
+}
+
+/**
+ * Apply content-stream edits ({ streamObjectNumber, start, end, text }) plus
+ * resource updates and new objects, and write an incremental update.
+ */
+async function commitStreamEdits(analysis, rawEdits, resources, extraObjects = []) {
+  const { index, context } = analysis
+  const editsByStream = new Map()
+  const seenRanges = new Set()
+  for (const edit of rawEdits) {
+    const rangeKey = `${edit.streamObjectNumber}:${edit.start}:${edit.end}`
+    if (seenRanges.has(rangeKey)) continue
+    seenRanges.add(rangeKey)
+    if (!editsByStream.has(edit.streamObjectNumber)) editsByStream.set(edit.streamObjectNumber, [])
+    editsByStream.get(edit.streamObjectNumber).push(edit)
+  }
+
+  const objects = new Map()
+  for (const [streamNumber, edits] of editsByStream) {
+    const stream = context.streams.get(streamNumber)
+    edits.sort((a, b) => b.start - a.start)
+    let source = stream.source
+    for (const edit of edits) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end)
+    const compressed = await deflate(latin1Bytes(source))
+    const original = index.getObject(streamNumber)
+    const dict = cloneDict(resources.updates.get(streamNumber)?.value ?? original.value)
+    dict.delete('DecodeParms')
+    dict.delete('DP')
+    dict.delete('DL')
+    dict.set('Filter', name('FlateDecode'))
+    dict.set('Length', compressed.length)
+    if (stream.owner.kind === 'xobject' && resources.xobjectResources.has(streamNumber)) dict.set('Resources', resources.xobjectResources.get(streamNumber))
+    objects.set(streamNumber, { num: streamNumber, gen: original.gen ?? 0, value: dict, stream: compressed })
+  }
+  for (const [num, update] of resources.updates) {
+    if (objects.has(num)) continue
+    if (update.stream === undefined && index.getObject(num)?.stream) continue
+    objects.set(num, update)
+  }
+  for (const [num, dict] of resources.xobjectResources) {
+    if (objects.has(num)) continue
+    const original = index.getObject(num)
+    const updated = cloneDict(original.value)
+    updated.set('Resources', dict)
+    objects.set(num, { num, gen: original.gen ?? 0, value: updated, stream: original.stream })
+  }
+  for (const object of extraObjects) objects.set(object.num, object)
+  return writeIncrementalUpdate(index, [...objects.values()])
+}
+
+const runEdit = (edit) => ({ streamObjectNumber: edit.run.streamObjectNumber, start: edit.run.start, end: edit.run.end, text: edit.text })
+
+function locateBlock(analysis, reference) {
+  if (!reference) return null
+  const byKey = analysis.blocks.find((block) => block.key === reference.key)
+  if (byKey) return byKey
+  const firstRun = reference.runKeys?.[0]
+  if (firstRun) {
+    const containing = analysis.blocks.find((block) => block.runKeys.includes(firstRun))
+    if (containing) return containing
   }
   return null
 }
 
-function advanceTextMatrix(matrix, advancePoints) {
-  const next = [...matrix]
-  next[4] += advancePoints * matrix[0]
-  next[5] += advancePoints * matrix[1]
-  return next
+function lineTextFrom(analysis, pageIndex, origin, block) {
+  const size = block.fontSizeUser
+  const start = dot(origin, block.direction)
+  const baseline = dot(origin, block.normal)
+  return analysis.blocks
+    .filter((candidate) => (
+      candidate.pageIndex === pageIndex &&
+      Math.abs(candidate.angle - block.angle) <= 1 &&
+      Math.abs(dot(candidate.startPoint, block.normal) - baseline) <= Math.max(0.5, 0.3 * size) &&
+      dot(candidate.startPoint, block.direction) >= start - 0.3 * size
+    ))
+    .sort((a, b) => dot(a.startPoint, block.direction) - dot(b.startPoint, block.direction))
+    .map((candidate) => candidate.text)
+    .join('')
 }
 
-function updateTextPosition(tokens, tokenIndex, state) {
-  const operator = tokens[tokenIndex]?.value
-  if (operator === 'BT') {
-    state.textMatrix = [1, 0, 0, 1, 0, 0]
-    state.textLineMatrix = [...state.textMatrix]
-    return
+function findBlockNear(analysis, pageIndex, origin, block) {
+  const size = block.fontSizeUser
+  let best = null
+  let bestDistance = Infinity
+  for (const candidate of analysis.blocks) {
+    if (candidate.pageIndex !== pageIndex) continue
+    const distance = Math.hypot(candidate.startPoint.x - origin.x, candidate.startPoint.y - origin.y)
+    if (distance < bestDistance && distance <= Math.max(1, 0.6 * size)) { best = candidate; bestDistance = distance }
   }
-  if (operator === 'Tm') {
-    const values = previousNumericOperands(tokens, tokenIndex, 6)
-    if (values) {
-      state.textMatrix = values
-      state.textLineMatrix = [...values]
+  return best
+}
+
+function fontRequestFor(font) {
+  return {
+    postscriptName: font.postscriptName,
+    family: font.family,
+    bold: font.bold,
+    italic: font.italic,
+    serif: font.serif,
+    fixedPitch: font.fixedPitch,
+  }
+}
+
+/**
+ * Replace the text of one editable block (a line fragment with one style).
+ * options.fontProvider supplies installed fonts for characters missing from
+ * the PDF's embedded subset font.
+ */
+export async function replaceNativeTextBlock(bytes, blockReference, replacementText, options = {}) {
+  const analysis = await analyzeDocument(bytes)
+  const block = locateBlock(analysis, blockReference)
+  if (!block) throw new Error('The selected text changed. Click it again before editing.')
+  if (blockReference.text !== undefined && stripSpaces(blockReference.text) !== stripSpaces(block.text)) {
+    throw new Error('The selected text changed. Click it again before editing.')
+  }
+  if (!block.editable) throw new Error(block.reason || 'This text cannot be edited.')
+  const newText = String(replacementText ?? '').replace(/[\r\n\t]+/g, ' ')
+  if (newText === block.text) throw new Error('The replacement text is identical to the original text. Make a change before replacing it.')
+  if (COMPLEX_SCRIPT.test(newText)) throw new Error('Typing Hindi or other complex-script text into a PDF is not supported yet.')
+  return applyBlockEdit(bytes, analysis, block, newText, options)
+}
+
+async function applyBlockEdit(bytes, analysis, block, newText, options) {
+  const { index, context } = analysis
+  const runsByKey = new Map(context.runs.map((run) => [run.key, run]))
+  const font = context.fontCache.get(block.fontKey)
+  const warnings = []
+
+  // Decide whether the original font can draw the new characters.
+  const { middle } = computeDiff(block.chars, newText)
+  const missing = [...new Set([...middle].filter((character) => !/\s/.test(character) && font.encodeCharacter(character) === null))]
+  let fallback = null
+  if (missing.length) {
+    fallback = await resolveFallbackFont(fontRequestFor(font), newText, options.fontProvider)
+    if (!fallback) {
+      throw new Error(`The PDF font cannot draw ${missing.join(' ')} and no matching font is installed on this computer. Install the font (or allow font access) and try again.`)
     }
-    return
   }
-  if (operator === 'Td' || operator === 'TD') {
-    const values = previousNumericOperands(tokens, tokenIndex, 2)
-    if (!values) return
-    const [tx, ty] = values
-    if (operator === 'TD') state.leading = -ty
-    const [a, b, c, d, x, y] = state.textLineMatrix
-    state.textLineMatrix = [a, b, c, d, x + tx * a + ty * c, y + tx * b + ty * d]
-    state.textMatrix = [...state.textLineMatrix]
-    return
+
+  let nextObjectNumber = index.size
+  const allocate = () => nextObjectNumber++
+  const resources = new ResourceUpdater(index, analysis)
+  // The font objects are built after planning so the glyph subset is complete.
+  let fallbackFontRef = null
+  const fallbackNames = new Map()
+
+  const allBlocks = [block, ...(block.twinBlocks || [])]
+  const excludedKeys = new Set(allBlocks.flatMap((item) => item.runKeys))
+  const plans = []
+  for (const target of allBlocks) {
+    const targetRuns = target.runKeys.map((key) => runsByKey.get(key))
+    if (targetRuns.some((run) => !run)) continue
+    const targetFont = context.fontCache.get(target.fontKey) || font
+    const stream = context.streams.get(targetRuns[0].streamObjectNumber)
+    let resourceName = null
+    if (fallback) {
+      if (!fallbackFontRef) fallbackFontRef = new PdfRef(allocate(), 0)
+      const key = stream.owner.kind === 'xobject' ? `x:${stream.owner.num}` : `p:${stream.owner.pageNum}`
+      if (!fallbackNames.has(key)) fallbackNames.set(key, resources.addFont(stream, fallbackFontRef))
+      resourceName = fallbackNames.get(key)
+    }
+    let plan
+    try {
+      plan = planBlockRewrite({ block: target, blockRuns: targetRuns, font: targetFont, newText, fallback, fallbackResourceName: resourceName })
+    } catch (error) {
+      if (target === block) throw error
+      continue
+    }
+    plans.push({ target, plan })
   }
-  if (operator === 'T*') {
-    const [a, b, c, d, x, y] = state.textLineMatrix
-    state.textLineMatrix = [a, b, c, d, x - state.leading * c, y - state.leading * d]
-    state.textMatrix = [...state.textLineMatrix]
+  const primary = plans[0].plan
+
+  const blockRunKeys = new Set(block.runKeys)
+  const codeBytesFor = (run) => context.fontCache.get(run.fontKey)?.codeBytes || 1
+  // Runs of the edited block after the rewritten range move with the chain.
+  const chainExcluded = new Set([...excludedKeys].filter((key) => {
+    const position = block.runKeys.indexOf(key)
+    return position < 0 || position <= primary.endRun
+  }))
+  const shift = buildShiftEdits({
+    analysis, block, blockRunKeys, excludedKeys: chainExcluded, oldEnd: primary.oldEnd, delta: primary.delta, codeBytesFor,
+  })
+  warnings.push(...shift.warnings)
+
+  const extraObjects = fallback ? (await fallback.encoder.buildObjects(allocate, fallbackFontRef.num)).objects : []
+  const nextBytes = await commitStreamEdits(analysis, [...plans.flatMap((item) => item.plan.edits), ...shift.edits].map(runEdit), resources, extraObjects)
+
+  // Verify: the edited line now reads the new text from the same origin.
+  const verification = await analyzeDocument(nextBytes)
+  if (newText.trim()) {
+    const lineText = lineTextFrom(verification, block.pageIndex, block.startPoint, block)
+    if (!stripSpaces(lineText).startsWith(stripSpaces(newText))) {
+      throw new Error('The edit could not be verified in the rewritten PDF, so it was not applied.')
+    }
+  }
+  const updatedBlock = findBlockNear(verification, block.pageIndex, block.startPoint, block)
+  const firstRun = updatedBlock ? verification.runs.find((run) => run.key === updatedBlock.runKeys[0]) : null
+  return {
+    bytes: nextBytes,
+    block: updatedBlock,
+    run: firstRun,
+    originalText: block.text,
+    replacementText: newText,
+    fontPlan: fallback ? { kind: 'fallback', match: fallback.match, label: fallback.label } : { kind: 'original', label: font.family },
+    warnings,
+    inspection: toPublicInspection(verification, nextBytes),
   }
 }
 
-function summarizeFontMetadata(fonts) {
-  return [...fonts.values()].map((font) => font.metadata)
+// ---------------------------------------------------------------------------
+// Restyling existing text (font, size, colour, bold, italic)
+// ---------------------------------------------------------------------------
+
+function fillColorOperators(hex) {
+  const match = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''))
+  if (!match) return null
+  const value = parseInt(match[1], 16)
+  const components = [(value >> 16) & 255, (value >> 8) & 255, value & 255].map((component) => formatPdfNumber(Math.round((component / 255) * 1000) / 1000))
+  return { fill: `${components.join(' ')} rg`, stroke: `${components.join(' ')} RG` }
 }
 
-export async function inspectNativePdfText(bytes) {
-  const index = await createPdfIndex(bytes)
-  const pages = getPageObjects(index)
-  const runs = []
-  const fontRecords = new Map()
+/** Font for restyled text: a standard PDF font, or the requested installed family. */
+async function resolveStyleFont(request, text, fontProvider) {
+  const visible = text.replace(/\s+/g, '') || 'a'
+  if (request.source === 'standard' || isStandardFamily(request.family)) {
+    const encoder = createStandardFontEncoder(standardFontFor(isStandardFamily(request.family) ? request.family : 'Helvetica', request.bold, request.italic))
+    if (encoder.canEncode(visible)) return { encoder, match: 'exact', label: encoder.label }
+  }
+  return resolveFallbackFont({ postscriptName: '', family: request.family, bold: request.bold, italic: request.italic, serif: request.serif, fixedPitch: request.fixedPitch }, visible, fontProvider)
+}
 
-  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
-    const page = pages[pageIndex]
-    const resources = extractFontResourceDictionary(page.dictionary, index)
-    const fonts = await parseFontMaps(index, resources)
-    for (const metadata of summarizeFontMetadata(fonts)) {
-      const fontKey = metadata.id
-      const existingFont = fontRecords.get(fontKey)
-      if (existingFont) {
-        if (!existingFont.pageIndices.includes(pageIndex)) existingFont.pageIndices.push(pageIndex)
-        if (!existingFont.pageNumbers.includes(pageIndex + 1)) existingFont.pageNumbers.push(pageIndex + 1)
-      } else {
-        fontRecords.set(fontKey, { ...metadata, pageIndices: [pageIndex], pageNumbers: [pageIndex + 1] })
+/** Rewrite a whole block in one operator with a new font/size/colour. */
+function planRestyle({ block, blockRuns, font, encoder, resourceName, newFontSize, fillOps }) {
+  const target = blockRuns[0]
+  const oldSize = target.fontSize
+  const size = newFontSize ?? oldSize
+  const horizontal = target.horizontalScaling / 100
+  const toTextSpace = (adjust) => (-adjust / 1000) * size * horizontal
+  const elements = []
+  let advance = 0
+  if (encoder) {
+    for (const glyph of encoder.encode(block.text)) {
+      elements.push({ code: glyph.code })
+      const isOneByteSpace = encoder.codeBytes === 1 && glyph.code === 32
+      advance += ((glyph.width / 1000) * size + target.characterSpacing + (isOneByteSpace ? target.wordSpacing : 0)) * horizontal
+      let extra = glyph.kern ? -glyph.kern : 0
+      if (glyph.isSpace && encoder.codeBytes === 2 && target.wordSpacing && size) extra += (-target.wordSpacing * 1000) / size
+      if (extra) { elements.push({ adjust: extra }); advance += toTextSpace(extra) }
+    }
+  } else {
+    blockRuns.forEach((run, runIndex) => {
+      if (runIndex > 0) {
+        const previous = blockRuns[runIndex - 1]
+        const gapText = (dot(run.originPoint, block.direction) - dot(previous.advanceEndPoint, block.direction)) / target.scaleX
+        // Relative to the original size so word gaps scale with the text.
+        const adjust = -(gapText * 1000) / (oldSize * horizontal)
+        elements.push({ adjust })
+        advance += toTextSpace(adjust)
       }
-    }
-    const contentRefs = pageContentRefs(page.dictionary)
-
-    for (const streamObjectNumber of contentRefs) {
-      const streamObject = getPdfObject(index, streamObjectNumber)
-      if (!streamObject.stream) continue
-      const decoded = /\/FlateDecode/.test(streamObject.dictionary || '') ? await inflate(streamObject.stream) : streamObject.stream
-      const tokens = tokenizeContent(decoded)
-      const state = {
-        activeFont: '', fontSize: 0, characterSpacing: 0, wordSpacing: 0,
-        horizontalScaling: 100, leading: 0, textRise: 0, textRenderingMode: 0,
-        fillColor: '#000000', strokeColor: '#000000',
-        textMatrix: [1, 0, 0, 1, 0, 0], textLineMatrix: [1, 0, 0, 1, 0, 0],
-      }
-
-      for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
-        const token = tokens[tokenIndex]
-        if (token.type !== 'word') continue
-        const operator = token.value
-        if (operator === 'BT' || operator === 'Tm' || operator === 'Td' || operator === 'TD' || operator === 'T*') {
-          updateTextPosition(tokens, tokenIndex, state)
-          continue
-        }
-        if (operator === 'Tf') {
-          const possibleName = tokens[tokenIndex - 2]
-          if (possibleName?.type === 'name') state.activeFont = possibleName.value
-          state.fontSize = Number(tokens[tokenIndex - 1]?.value) || state.fontSize
-          continue
-        }
-        if (['Tc', 'Tw', 'Tz', 'TL', 'Ts', 'Tr'].includes(operator)) {
-          const value = Number(tokens[tokenIndex - 1]?.value)
-          if (Number.isFinite(value)) {
-            if (operator === 'Tc') state.characterSpacing = value
-            if (operator === 'Tw') state.wordSpacing = value
-            if (operator === 'Tz') state.horizontalScaling = value
-            if (operator === 'TL') state.leading = value
-            if (operator === 'Ts') state.textRise = value
-            if (operator === 'Tr') state.textRenderingMode = value
-          }
-          continue
-        }
-        if (['rg', 'g', 'k'].includes(operator)) {
-          state.fillColor = readPdfColor(tokens, tokenIndex, operator) || state.fillColor
-          continue
-        }
-        if (['RG', 'G', 'K'].includes(operator)) {
-          state.strokeColor = readPdfColor(tokens, tokenIndex, operator) || state.strokeColor
-          continue
-        }
-
-        const font = fonts.get(state.activeFont)
-        if (!font?.metadata?.canNativeReplace) continue
-        const common = {
-          pageIndex, pageNumber: pageIndex + 1, streamObjectNumber,
-          fontResource: state.activeFont, fontObjectNumber: font.fontObjectNumber,
-          fontInfoId: String(pageIndex) + ':' + font.metadata.id,
-          fontMetadata: font.metadata,
-          fontSize: state.fontSize, characterSpacing: state.characterSpacing,
-          wordSpacing: state.wordSpacing, horizontalScaling: state.horizontalScaling,
-          textRise: state.textRise, textRenderingMode: state.textRenderingMode,
-          fillColor: state.fillColor, strokeColor: state.strokeColor,
-          textMatrix: [...state.textMatrix],
-          position: { x: state.textMatrix[4], y: state.textMatrix[5] + state.textRise },
-          fontEncoding: font.encoding, supportedCharacters: [...font.unicodeToCode.keys()],
-        }
-
-        if (operator === 'Tj') {
-          const stringToken = tokens[tokenIndex - 1]
-          if (stringToken?.type !== 'string' && stringToken?.type !== 'hex') continue
-          const text = decodeFontText(stringToken.bytes, font)
-          if (!text || text.includes('\uFFFD')) continue
-          const originalCodes = fontCodeUnits(stringToken.bytes, font)
-          const glyphWidth1000 = originalCodes.reduce((sum, code) => sum + (font.widths.get(code) ?? font.defaultWidth), 0)
-          const spaceCount = [...text].filter((character) => character === ' ').length
-          const spacingAdvance1000 = state.fontSize > 0 ? ((state.characterSpacing * originalCodes.length + state.wordSpacing * spaceCount) * 1000) / state.fontSize : 0
-          const run = {
-            ...common,
-            key: String(pageIndex) + ':' + streamObjectNumber + ':' + stringToken.start + ':' + stringToken.end,
-            originalText: text, tokenType: 'Tj', start: stringToken.start, end: token.end,
-            glyphWidth1000, originalAdvance1000: glyphWidth1000 + spacingAdvance1000,
-          }
-          runs.push(run)
-          const advancePoints = ((run.originalAdvance1000 * state.fontSize) / 1000) * (state.horizontalScaling / 100)
-          state.textMatrix = advanceTextMatrix(state.textMatrix, advancePoints)
-          continue
-        }
-
-        if (operator === 'TJ') {
-          const arrayEnd = tokens[tokenIndex - 1]
-          if (arrayEnd?.type !== 'arrayEnd') continue
-          let depth = 0
-          let arrayStartIndex = -1
-          for (let cursor = tokenIndex - 1; cursor >= 0; cursor -= 1) {
-            if (tokens[cursor].type === 'arrayEnd') depth += 1
-            else if (tokens[cursor].type === 'arrayStart') {
-              depth -= 1
-              if (depth === 0) { arrayStartIndex = cursor; break }
-            }
-          }
-          if (arrayStartIndex < 0) continue
-          const inner = tokens.slice(arrayStartIndex + 1, tokenIndex - 1)
-          const stringTokens = inner.filter((item) => item.type === 'string' || item.type === 'hex')
-          const text = stringTokens.map((item) => decodeFontText(item.bytes, font)).join('')
-          if (!text || text.includes('\uFFFD')) continue
-          const originalGlyphWidth1000 = stringTokens.flatMap((item) => fontCodeUnits(item.bytes, font)).reduce((sum, code) => sum + (font.widths.get(code) ?? font.defaultWidth), 0)
-          const kerningAdjustment1000 = inner.filter((item) => item.type === 'number').reduce((sum, item) => sum + Number(item.value), 0)
-          const glyphCount = stringTokens.reduce((sum, item) => sum + fontCodeUnits(item.bytes, font).length, 0)
-          const spaceCount = [...text].filter((character) => character === ' ').length
-          const spacingAdvance1000 = state.fontSize > 0 ? ((state.characterSpacing * glyphCount + state.wordSpacing * spaceCount) * 1000) / state.fontSize : 0
-          const run = {
-            ...common,
-            key: String(pageIndex) + ':' + streamObjectNumber + ':' + tokens[arrayStartIndex].start + ':' + arrayEnd.end,
-            originalText: text, tokenType: 'TJ', start: tokens[arrayStartIndex].start, end: arrayEnd.end,
-            stringCount: stringTokens.length,
-            hasKerningAdjustments: inner.some((item) => item.type === 'number'),
-            originalGlyphWidth1000, kerningAdjustment1000, spacingAdvance1000,
-            originalAdvance1000: originalGlyphWidth1000 - kerningAdjustment1000 + spacingAdvance1000,
-          }
-          runs.push(run)
-          const advancePoints = ((run.originalAdvance1000 * state.fontSize) / 1000) * (state.horizontalScaling / 100)
-          state.textMatrix = advanceTextMatrix(state.textMatrix, advancePoints)
+      for (const glyph of run.glyphs) {
+        if (glyph.code !== undefined) {
+          elements.push({ code: glyph.code })
+          const isSpace = font.codeBytes === 1 && glyph.code === 32
+          advance += (glyph.width * size + target.characterSpacing + (isSpace ? target.wordSpacing : 0)) * horizontal
+        } else {
+          elements.push({ adjust: glyph.adjust })
+          advance += toTextSpace(glyph.adjust)
         }
       }
-    }
+    })
   }
-
-  return { runs, fonts: [...fontRecords.values()], pageCount: pages.length, sourceBytes: bytes.slice() }
-}
-function encodeTextForFont(text, font) {
-  const codes = []
-  const allowed = font.metadata?.supportedCharacters ? new Set(font.metadata.supportedCharacters.map((character) => font.unicodeToCode.get(character))) : null
-  for (const character of text) {
-    const code = font.unicodeToCode.get(character)
-    if (code === undefined || (allowed && !allowed.has(code))) {
-      const label = character === ' ' ? 'space' : character
-      throw new Error('The selected font subset does not contain the character “' + label + '”. No replacement was applied; no overlay text was created.')
-    }
-    if (font.isComposite) {
-      if (code > 0xffff) throw new Error('This PDF font uses a code outside the supported 2-byte Identity-H range.')
-    } else if (code < 0 || code > 0xff) {
-      throw new Error('The selected simple PDF font cannot encode character “' + character + '” in its one-byte encoding.')
-    }
-    if (!font.isComposite && font.metadata?.isEmbedded && font.supportedCodes && !font.supportedCodes.has(code)) {
-      throw new Error('The embedded font subset does not contain the glyph for “' + character + '”. No replacement was applied.')
-    }
-    codes.push(code)
+  const keepAdvance = -((target.advance - advance) * 1000) / (size * horizontal)
+  const codeBytes = encoder ? encoder.codeBytes : font.codeBytes
+  const restoreFill = fillOps ? target.fillColorOps : ''
+  const strokes = [1, 2, 5, 6].includes(target.textRenderingMode)
+  const parts = []
+  if (fillOps) parts.push(fillOps.fill)
+  if (fillOps && strokes) parts.push(fillOps.stroke)
+  parts.push(showPrefix(target).trim())
+  parts.push(`/${encoder ? resourceName : target.fontResource} ${formatPdfNumber(size)} Tf`)
+  parts.push(`[${elementsToTJ([...elements, { adjust: keepAdvance }], codeBytes)}] TJ`)
+  parts.push(`/${target.fontResource} ${formatPdfNumber(oldSize)} Tf`)
+  if (restoreFill) parts.push(restoreFill)
+  if (fillOps && strokes) parts.push(target.strokeColorOps)
+  const edits = [{ run: target, text: parts.filter(Boolean).join(' ') }]
+  for (const run of blockRuns.slice(1)) {
+    const adjust = textSpaceUnitsToAdjust(run.advance, run)
+    const blank = Math.abs(adjust) > 0.0005 ? `[${formatPdfNumber(Number(adjust.toFixed(3)))}] TJ` : ''
+    edits.push({ run, text: `${showPrefix(run)}${blank}`.trim() || ' ' })
   }
-  if (!codes.length) throw new Error('Replacement text cannot be empty.')
-  const hex = codes.map((code) => code.toString(16).padStart(font.isComposite ? 4 : 2, '0')).join('').toUpperCase()
-  return '<' + hex + '>'
+  const newEnd = dot(target.originPoint, block.direction) + advance * target.scaleX
+  const oldEnd = dot(blockRuns.at(-1).advanceEndPoint, block.direction)
+  return { edits, delta: newEnd - oldEnd, oldEnd, newEnd }
 }
 
-async function appendIncrementalStreamRevision(bytes, index, objectNumber, newDictionary, newStream) {
-  const originalSize = Number(index.trailer.match(/\/Size\s+(\d+)/)?.[1])
-  if (!Number.isInteger(originalSize)) throw new Error('PDF trailer Size value is missing.')
-  const entry = index.entries.get(objectNumber)
-  if (!entry) throw new Error('Original page content stream could not be located.')
+/**
+ * Change the look of an existing text block: style = { fontSize (points as
+ * displayed), color ('#RRGGBB'), fontFamily, fontSource, bold, italic }.
+ * Text after it on the same line moves to fit, like a normal edit.
+ */
+export async function restyleNativeTextBlock(bytes, blockReference, style = {}, options = {}) {
+  const analysis = await analyzeDocument(bytes)
+  const block = locateBlock(analysis, blockReference)
+  if (!block) throw new Error('The selected text changed. Click it again before changing its style.')
+  if (blockReference.text !== undefined && stripSpaces(blockReference.text) !== stripSpaces(block.text)) {
+    throw new Error('The selected text changed. Click it again before changing its style.')
+  }
+  if (!block.editable) throw new Error(block.reason || 'This text cannot be changed.')
+  const { index, context } = analysis
+  const font = context.fontCache.get(block.fontKey)
+  const warnings = []
 
-  const prefix = bytes.length && bytes[bytes.length - 1] !== 10 ? '\n' : ''
-  const prefixBytes = latin1Bytes(prefix)
-  const objectHeader = latin1Bytes(`${objectNumber} ${entry.generation} obj\n${newDictionary}\nstream\n`)
-  const objectEnd = latin1Bytes('\nendstream\nendobj\n')
-  const objectOffset = bytes.length + prefixBytes.length
-  const xrefOffset = objectOffset + objectHeader.length + newStream.length + objectEnd.length
-  const xrefEntry = `${String(objectOffset).padStart(10, '0')} ${String(entry.generation).padStart(5, '0')} n \n`
-  const xref = latin1Bytes(`xref\n${objectNumber} 1\n${xrefEntry}`)
+  const currentFamily = font.family || block.fontMetadata?.fontFamily || ''
+  const familyChanged = style.fontFamily && normalizeFontKey(style.fontFamily) !== normalizeFontKey(currentFamily)
+  const boldChanged = style.bold !== undefined && Boolean(style.bold) !== Boolean(font.bold)
+  const italicChanged = style.italic !== undefined && Boolean(style.italic) !== Boolean(font.italic)
+  let fallback = null
+  if (familyChanged || boldChanged || italicChanged) {
+    const request = {
+      family: style.fontFamily || currentFamily || 'Helvetica',
+      source: style.fontSource,
+      bold: style.bold ?? font.bold,
+      italic: style.italic ?? font.italic,
+      serif: font.serif,
+      fixedPitch: font.fixedPitch,
+    }
+    fallback = await resolveStyleFont(request, block.text, options.fontProvider)
+    if (!fallback) throw new Error(`No installed font can draw this text in ${request.family}${request.bold ? ' bold' : ''}${request.italic ? ' italic' : ''}. Allow font access in Chrome or Edge, or pick another font.`)
+    if (fallback.match !== 'exact') warnings.push(`${request.family}${request.bold ? ' Bold' : ''}${request.italic ? ' Italic' : ''} is not available on this computer, so ${fallback.label} was used.`)
+  }
+  const scaleRatio = Math.abs(block.fontSize) ? block.fontSizeUser / Math.abs(block.fontSize) : 1
+  const newFontSize = Number.isFinite(style.fontSize) && style.fontSize > 0 && Math.abs(style.fontSize - block.fontSizeUser) > 0.01
+    ? (Math.sign(block.fontSize) || 1) * (style.fontSize / scaleRatio)
+    : null
+  const fillOps = style.color && style.color.toUpperCase() !== String(block.fillColor || '').toUpperCase() ? fillColorOperators(style.color) : null
+  if (!fallback && newFontSize === null && !fillOps) throw new Error('Choose a different font, size or colour first.')
 
-  const trailer = sanitizeTrailerForClassicXref(index.trailer, originalSize, index.latestXref)
-  const trailerBytes = latin1Bytes(`trailer\n${trailer}\nstartxref\n${xrefOffset}\n%%EOF\n`)
-  return concatBytes([bytes, prefixBytes, objectHeader, newStream, objectEnd, xref, trailerBytes])
+  let nextObjectNumber = index.size
+  const allocate = () => nextObjectNumber++
+  const resources = new ResourceUpdater(index, analysis)
+  const fontRef = fallback ? new PdfRef(allocate(), 0) : null
+  const fontNames = new Map()
+  const allBlocks = [block, ...(block.twinBlocks || [])]
+  const excludedKeys = new Set(allBlocks.flatMap((item) => item.runKeys))
+  const plans = []
+  for (const target of allBlocks) {
+    const targetRuns = target.runKeys.map((key) => context.runsByKey.get(key))
+    if (targetRuns.some((run) => !run)) continue
+    const stream = context.streams.get(targetRuns[0].streamObjectNumber)
+    let resourceName = null
+    if (fallback) {
+      const key = stream.owner.kind === 'xobject' ? `x:${stream.owner.num}` : `p:${stream.owner.pageNum}`
+      if (!fontNames.has(key)) fontNames.set(key, resources.addFont(stream, fontRef))
+      resourceName = fontNames.get(key)
+    }
+    plans.push(planRestyle({
+      block: target, blockRuns: targetRuns, font: context.fontCache.get(target.fontKey) || font,
+      encoder: fallback?.encoder || null, resourceName, newFontSize, fillOps,
+    }))
+  }
+  if (!plans.length) throw new Error('This text cannot be changed.')
+  const primary = plans[0]
+  const codeBytesFor = (run) => context.fontCache.get(run.fontKey)?.codeBytes || 1
+  const shift = buildShiftEdits({ analysis, block, blockRunKeys: new Set(block.runKeys), excludedKeys, oldEnd: primary.oldEnd, delta: primary.delta, codeBytesFor })
+  warnings.push(...shift.warnings)
+  const extraObjects = fallback ? (await fallback.encoder.buildObjects(allocate, fontRef.num)).objects : []
+  const nextBytes = await commitStreamEdits(analysis, [...plans.flatMap((plan) => plan.edits), ...shift.edits].map(runEdit), resources, extraObjects)
+
+  const verification = await analyzeDocument(nextBytes)
+  const updatedBlock = findBlockNear(verification, block.pageIndex, block.startPoint, block)
+  if (!updatedBlock || stripSpaces(updatedBlock.text) !== stripSpaces(block.text)) {
+    throw new Error('The style change could not be verified in the rewritten PDF, so it was not applied.')
+  }
+  return {
+    bytes: nextBytes,
+    block: updatedBlock,
+    fontPlan: fallback ? { kind: 'fallback', match: fallback.match, label: fallback.label } : { kind: 'original', label: font.family },
+    warnings,
+    inspection: toPublicInspection(verification, nextBytes),
+  }
 }
 
-export async function replaceNativePdfText(bytes, run, replacementText) {
+// ---------------------------------------------------------------------------
+// Existing page images: move, resize, rotate, replace, delete, opacity
+// ---------------------------------------------------------------------------
+
+function boxMatrix(from, to, rotation = 0) {
+  const sx = from.width ? to.width / from.width : 1
+  const sy = from.height ? to.height / from.height : 1
+  let matrix = multiplyMatrix(multiplyMatrix(translateMatrix(-from.x, -from.y), scaleMatrix(sx, sy)), translateMatrix(to.x, to.y))
+  if (rotation) {
+    const cx = to.x + to.width / 2
+    const cy = to.y + to.height / 2
+    matrix = multiplyMatrix(matrix, multiplyMatrix(multiplyMatrix(translateMatrix(-cx, -cy), rotateMatrix(rotation)), translateMatrix(cx, cy)))
+  }
+  return matrix
+}
+
+const matrixOperands = (m) => m.map((value) => formatPdfNumber(Math.round(value * 100000) / 100000)).join(' ')
+
+/**
+ * Edit an image that is part of the page content.
+ * operation: { type: 'transform', from, to, rotation } (view-space boxes at 100 %),
+ *            { type: 'delete' }, { type: 'replace', data }, { type: 'opacity', value }
+ */
+export async function editPageImage(bytes, imageReference, operation) {
+  const analysis = await analyzeDocument(bytes)
+  const image = analysis.images.find((item) => item.key === imageReference?.key)
+  if (!image) throw new Error('The selected image changed. Click it again.')
+  if (!image.editable) throw new Error(image.reason)
+  const { index, context } = analysis
+  const stream = context.streams.get(image.streamObjectNumber)
+  const original = stream.source.slice(image.start, image.end)
+  const resources = new ResourceUpdater(index, analysis)
+  let nextObjectNumber = index.size
+  const allocate = () => nextObjectNumber++
+  const extraObjects = []
+  let text
+  if (operation?.type === 'transform') {
+    const geometry = pageGeometry(index, analysis.pages[image.pageIndex])
+    const viewMatrix = boxMatrix(operation.from || image.viewRect, operation.to, operation.rotation || 0)
+    const userMatrix = multiplyMatrix(multiplyMatrix(geometry.toView, viewMatrix), geometry.toUser)
+    // New placement D = C x S; inserted operator X satisfies X x C = D.
+    const inserted = multiplyMatrix(multiplyMatrix(image.ctm, userMatrix), invertMatrix(image.ctm))
+    text = `q ${matrixOperands(inserted)} cm ${original} Q`
+  } else if (operation?.type === 'delete') {
+    text = ' '
+  } else if (operation?.type === 'replace') {
+    if (image.kind !== 'xobject') throw new Error('This image is stored inline in the page and cannot be replaced. Delete it and add a new image instead.')
+    if (!detectImageFormat(operation.data)) throw new Error('Choose a JPEG or PNG image.')
+    const built = await buildImageXObject(operation.data, allocate)
+    extraObjects.push(...built.objects)
+    const resourceName = resources.addResource(stream, 'XObject', built.ref, 'EXI')
+    // Keep the new picture's proportions inside the old frame.
+    const frameWidth = Math.hypot(image.ctm[0], image.ctm[1])
+    const frameHeight = Math.hypot(image.ctm[2], image.ctm[3])
+    const frameAspect = frameHeight ? frameWidth / frameHeight : 1
+    const aspect = built.height ? built.width / built.height : 1
+    let sx = 1
+    let sy = 1
+    if (aspect > frameAspect) sy = frameAspect / aspect
+    else sx = aspect / frameAspect
+    text = `q ${matrixOperands([sx, 0, 0, sy, (1 - sx) / 2, (1 - sy) / 2])} cm /${resourceName} Do Q`
+  } else if (operation?.type === 'opacity') {
+    const value = Math.max(0, Math.min(1, Number(operation.value)))
+    const gsRef = new PdfRef(allocate(), 0)
+    extraObjects.push({ num: gsRef.num, gen: 0, value: new PdfDict([['Type', name('ExtGState')], ['ca', value], ['CA', value]]) })
+    const resourceName = resources.addResource(stream, 'ExtGState', gsRef, 'EXG')
+    text = `q /${resourceName} gs ${original} Q`
+  } else {
+    throw new Error('Unknown image operation.')
+  }
+  const nextBytes = await commitStreamEdits(analysis, [{ streamObjectNumber: image.streamObjectNumber, start: image.start, end: image.end, text }], resources, extraObjects)
+  const verification = await analyzeDocument(nextBytes)
+  const expected = analysis.images.filter((item) => item.pageIndex === image.pageIndex).length - (operation.type === 'delete' ? 1 : 0)
+  if (verification.images.filter((item) => item.pageIndex === image.pageIndex).length !== expected) {
+    throw new Error('The image change could not be verified in the rewritten PDF, so it was not applied.')
+  }
+  const updatedImage = operation.type === 'delete'
+    ? null
+    : verification.images.find((item) => item.pageIndex === image.pageIndex && item.streamObjectNumber === image.streamObjectNumber && item.start >= image.start && item.start <= image.start + text.length) || null
+  return { bytes: nextBytes, image: updatedImage, inspection: toPublicInspection(verification, nextBytes) }
+}
+
+/**
+ * Backwards-compatible API: replace one text-showing operator. The run is
+ * edited through the block engine (same-line text after it is moved to fit).
+ */
+export async function replaceNativePdfText(bytes, run, replacementText, options = {}) {
   if (!run || !Number.isInteger(run.streamObjectNumber)) throw new Error('Select an existing PDF text line before replacing it.')
-  if (!['Tj', 'TJ'].includes(run.tokenType)) throw new Error('This PDF text operator is not supported for native replacement.')
-
-  const inspection = await inspectNativePdfText(bytes)
-  const target = inspection.runs.find((item) => item.key === run.key)
+  const analysis = await analyzeDocument(bytes)
+  const target = analysis.runs.find((item) => item.key === run.key)
   if (!target) throw new Error('The selected text run changed. Select it again before replacing.')
-
-  const index = await createPdfIndex(bytes)
-  const pages = getPageObjects(index)
-  const page = pages[target.pageIndex]
-  const fontResources = extractFontResourceDictionary(page.dictionary, index)
-  const fonts = await parseFontMaps(index, fontResources)
-  const font = fonts.get(target.fontResource)
-  if (!font) throw new Error('The selected PDF font encoding could not be read.')
   if (replacementText === target.originalText) throw new Error('The replacement text is identical to the original text. Make a change before replacing it.')
-  const replacementToken = encodeTextForFont(replacementText, font)
-  const replacementCodes = [...replacementText].map((character) => font.unicodeToCode.get(character))
-  if (replacementCodes.some((code) => code === undefined)) throw new Error('Replacement text contains characters that this PDF font cannot encode.')
-  const replacementGlyphWidth1000 = replacementCodes.reduce((sum, code) => sum + (font.widths.get(code) ?? font.defaultWidth), 0)
-  const spaceCount = [...replacementText].filter((character) => character === ' ').length
-  const spacingAdvance1000 = target.fontSize > 0 ? ((target.characterSpacing * replacementCodes.length + target.wordSpacing * spaceCount) * 1000) / target.fontSize : 0
-  const adjustment = replacementGlyphWidth1000 + spacingAdvance1000 - target.originalAdvance1000
-  const adjustmentToken = Math.abs(adjustment) > 0.0001 ? ` ${pdfNumber(adjustment)}` : ''
-  // A Tj string is promoted to a TJ array so a final numeric adjustment can
-  // preserve the original text advance without changing its font or text state.
-  const nativeOperand = target.tokenType === 'TJ'
-    ? `[${replacementToken}${adjustmentToken}]`
-    : `[${replacementToken}${adjustmentToken}] TJ`
-
-  const contentObject = getPdfObject(index, target.streamObjectNumber)
-  if (!contentObject.stream) throw new Error('Selected text stream could not be read.')
-  const decoded = /\/FlateDecode/.test(contentObject.dictionary || '') ? await inflate(contentObject.stream) : contentObject.stream
-  const source = latin1(decoded)
-  const updatedContent = latin1Bytes(`${source.slice(0, target.start)}${nativeOperand}${source.slice(target.end)}`)
-  const compressed = /\/FlateDecode/.test(contentObject.dictionary || '') ? await deflate(updatedContent) : updatedContent
-  const lengthUpdatedDictionary = contentObject.dictionary.replace(/\/Length(?!\d)\s+\d+/, `/Length ${compressed.length}`)
-  if (lengthUpdatedDictionary === contentObject.dictionary && !/\/Length(?!\d)\s+\d+/.test(contentObject.dictionary)) {
-    throw new Error('The PDF stream length could not be updated safely.')
+  if (!String(replacementText || '').length) throw new Error('Replacement text cannot be empty.')
+  const owner = analysis.blocks.find((block) => block.runKeys.includes(target.key))
+  let block = owner
+  if (!owner || owner.runKeys.length !== 1) {
+    const [single] = buildTextBlocks([target], target.pageIndex)
+    if (!single) throw new Error('This PDF text run cannot be edited.')
+    decorateBlock(single, analysis.context)
+    single.twinBlocks = []
+    block = single
   }
-
-  const nextBytes = await appendIncrementalStreamRevision(bytes, index, target.streamObjectNumber, lengthUpdatedDictionary, compressed)
-  const verify = await inspectNativePdfText(nextBytes)
-  const matchingRun = verify.runs.find((item) => item.pageIndex === target.pageIndex && item.streamObjectNumber === target.streamObjectNumber && item.start === target.start)
-  if (!matchingRun || matchingRun.originalText !== replacementText) {
-    throw new Error('The native PDF replacement could not be verified at the selected text position. The original document has not been changed in the editor.')
-  }
-  return { bytes: nextBytes, run: matchingRun, originalText: target.originalText, replacementText }
+  if (!block.editable) throw new Error(block.reason || 'This text cannot be edited.')
+  const result = await applyBlockEdit(bytes, analysis, block, String(replacementText).replace(/[\r\n\t]+/g, ' '), options)
+  const verifyRun = result.inspection.runs.find((item) => item.pageIndex === target.pageIndex && item.streamObjectNumber === target.streamObjectNumber && item.start === target.start)
+  return { ...result, run: verifyRun || result.run }
 }
-

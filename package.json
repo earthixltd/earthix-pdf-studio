@@ -1,7 +1,7 @@
 {
   "name": "earthix-pdf-studio",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "workspaces": [
     "frontend",
@@ -16,7 +16,7 @@
     "postinstall": "npm run prepare:assets",
     "test:engine": "node --test tests/engine/*.test.js",
     "test:document-core": "node --test tests/document-core/*.test.js",
-    "test": "node --test tests/engine/*.test.js tests/pdf-viewer/*.test.js tests/document-core/*.test.js tests/font-engine/*.test.js tests/page-manager.*.test.js",
+    "test": "node --test tests/engine/*.test.js tests/pdf-viewer/*.test.js tests/document-core/*.test.js tests/font-engine/*.test.js tests/page-manager.*.test.js tests/page-objects/*.test.js",
     "test:viewer": "node --test tests/pdf-viewer/*.test.js",
     "test:font-engine": "node --test tests/font-engine/*.test.js",
     "diagnose:pdf": "node frontend/scripts/diagnose-pdf-compatibility.js"

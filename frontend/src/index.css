@@ -7,16 +7,16 @@
  * Keep the breakpoint system limited to md and lg.
  */
 @theme {
-  --color-brand-50: #f7f5ff;
-  --color-brand-100: #eee9ff;
-  --color-brand-200: #ddd4ff;
-  --color-brand-300: #c4b3ff;
-  --color-brand-400: #a48aff;
-  --color-brand-500: #805eeF;
-  --color-brand-600: #6335df;
-  --color-brand-700: #5128bd;
-  --color-brand-800: #43239a;
-  --color-brand-900: #351d76;
+  --color-brand-50: #eef3ff;
+  --color-brand-100: #e0e8fe;
+  --color-brand-200: #c2d2fd;
+  --color-brand-300: #94b1fb;
+  --color-brand-400: #5f87f5;
+  --color-brand-500: #3a66ee;
+  --color-brand-600: #2454e6;
+  --color-brand-700: #1d45c4;
+  --color-brand-800: #1b3a9c;
+  --color-brand-900: #1a327a;
 
   --color-neutral-0: #ffffff;
   --color-neutral-50: #f8f9fc;
@@ -39,9 +39,9 @@
   --color-info-50: #eff7ff;
   --color-info-600: #2769a8;
 
-  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   --font-display: "DM Serif Display", Georgia, serif;
-  --font-brand: "Manrope", "DM Sans", ui-sans-serif, sans-serif;
+  --font-brand: "Inter", "Segoe UI", ui-sans-serif, sans-serif;
 
   --radius-control: 0.625rem;
   --radius-panel: 0.875rem;
@@ -69,7 +69,7 @@
   --color-workspace: #f3f5fa;
   --color-border: #e6e9f1;
   --color-border-strong: #d9deea;
-  --color-focus-ring: #9b83ed;
+  --color-focus-ring: #5f87f5;
 
   /* Shared spacing scale: 1 unit = 4px */
   --space-1: 0.25rem;

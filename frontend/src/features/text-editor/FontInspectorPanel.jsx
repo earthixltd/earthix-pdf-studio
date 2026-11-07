@@ -105,13 +105,23 @@ export function FontInspectorPanel({ fonts = [], run = null, replacementText = '
             </>
           )}
 
-          <div className={`font-inspector-compatibility ${compatibility?.supported ? 'is-supported' : 'is-limited'}`} role="status">
-            {compatibility?.supported ? <FaCheckCircle /> : <FaExclamationTriangle />}
-            <div>
-              <strong>{compatibility?.supported ? 'Replacement glyphs available' : 'Replacement compatibility'}</strong>
-              <small>{compatibility?.reason || (selectedFont.canNativeReplace ? 'The selected run uses a readable Identity-H font map.' : selectedFont.limitations?.[0]) || 'Inspect the selected run before replacing text.'}</small>
-            </div>
-          </div>
+          {(() => {
+            const usesFallback = Boolean(selectedFont.canNativeReplace && compatibility?.missingCharacters?.length)
+            const supported = compatibility?.supported || !replacementText
+            return (
+              <div className={`font-inspector-compatibility ${supported ? 'is-supported' : 'is-limited'}`} role="status">
+                {supported ? <FaCheckCircle /> : <FaExclamationTriangle />}
+                <div>
+                  <strong>{supported ? 'Original font can draw this text' : usesFallback ? 'Matching font will be used' : 'Editing limitation'}</strong>
+                  <small>{usesFallback
+                    ? `${compatibility.missingCharacters.join(' ')} ${compatibility.missingCharacters.length === 1 ? 'is' : 'are'} not in this PDF's embedded font. The same font installed on this computer (or the closest match) draws this text with the original size and colour.`
+                    : supported
+                      ? (selectedFont.canNativeReplace ? 'Typed characters reuse the glyphs embedded in this PDF.' : selectedFont.limitations?.[0])
+                      : compatibility?.reason || selectedFont.limitations?.[0]}</small>
+                </div>
+              </div>
+            )
+          })()}
 
           {!selectedFont.isEmbedded && (
             <div className="font-inspector-note"><FaLock /><span>The font program is not embedded. Native character replacement may be possible, but visual font fidelity cannot be guaranteed.</span></div>

@@ -1,0 +1,60 @@
+/* On-page editing layers (added objects, page images, selection handles). */
+
+.object-layer { position: absolute; inset: 0; z-index: 6; pointer-events: none; }
+.object-svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.object-node.is-interactive { cursor: move; pointer-events: auto; touch-action: none; }
+.object-node:not(.is-interactive) .object-hit, .object-node:not(.is-interactive) .object-hit-stroke { pointer-events: none; }
+.object-hit { fill: transparent; pointer-events: all; }
+.object-hit-stroke { fill: none; stroke: transparent; stroke-linecap: round; stroke-linejoin: round; pointer-events: stroke; }
+.object-node.is-interactive:hover .object-hit { fill: rgb(36 84 230 / 5%); }
+.note-icon { filter: drop-shadow(0 1px 1px rgb(0 0 0 / 25%)); }
+
+.create-surface { position: absolute; inset: 0; z-index: 2; pointer-events: auto; touch-action: none; cursor: crosshair; }
+.create-surface.cursor-text { cursor: text; }
+.create-surface.cursor-note, .create-surface.cursor-signature { cursor: copy; }
+.create-surface.cursor-draw { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'%3E%3Ccircle cx='11' cy='11' r='4' fill='none' stroke='%232454E6' stroke-width='2'/%3E%3Ccircle cx='11' cy='11' r='1' fill='%232454E6'/%3E%3C/svg%3E") 11 11, crosshair; }
+
+.selection-frame { position: absolute; z-index: 3; box-sizing: border-box; border: 1.5px solid #2454e6; border-radius: 1px; pointer-events: none; transform-origin: center; box-shadow: 0 0 0 1px rgb(255 255 255 / 70%); }
+.selection-frame.type-highlight, .selection-frame.type-note { border-style: dashed; }
+.selection-frame.is-locked { border-color: #b54708; border-style: dashed; }
+.frame-body { position: absolute; inset: 0; pointer-events: auto; cursor: move; touch-action: none; }
+.frame-handle { position: absolute; width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; border: 1.5px solid #2454e6; border-radius: 3px; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 20%); pointer-events: auto; touch-action: none; }
+.frame-handle::after { content: ''; position: absolute; inset: -9px; }
+.h-nw { top: 0; left: 0; cursor: nwse-resize; }
+.h-n { top: 0; left: 50%; cursor: ns-resize; }
+.h-ne { top: 0; left: 100%; cursor: nesw-resize; }
+.h-e { top: 50%; left: 100%; cursor: ew-resize; }
+.h-se { top: 100%; left: 100%; cursor: nwse-resize; }
+.h-s { top: 100%; left: 50%; cursor: ns-resize; }
+.h-sw { top: 100%; left: 0; cursor: nesw-resize; }
+.h-w { top: 50%; left: 0; cursor: ew-resize; }
+.type-text .h-e, .type-text .h-w { width: 7px; height: 18px; margin: -9px 0 0 -3.5px; border-radius: 4px; }
+.frame-rotate { position: absolute; top: -30px; left: 50%; width: 16px; height: 16px; margin-left: -8px; border: 1.5px solid #2454e6; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 20%); pointer-events: auto; touch-action: none; cursor: grab; }
+.frame-rotate::before { content: ''; position: absolute; top: 14px; left: 50%; width: 1.5px; height: 14px; margin-left: -.75px; background: #2454e6; }
+.frame-rotate::after { content: ''; position: absolute; inset: -8px; }
+.endpoint-handle { position: absolute; z-index: 4; width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; border: 2px solid #2454e6; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); pointer-events: auto; touch-action: none; cursor: crosshair; }
+.object-drag-proxy { position: absolute; inset: 0; z-index: 2; overflow: visible; pointer-events: none; }
+.object-drag-proxy line { stroke: transparent; stroke-linecap: round; pointer-events: stroke; cursor: move; touch-action: none; }
+
+.text-object-editor { position: absolute; z-index: 5; box-sizing: border-box; margin: 0; outline: 1.5px dashed #2454e6; outline-offset: 2px; pointer-events: auto; cursor: text; caret-color: #2454e6; overflow-wrap: break-word; user-select: text; -webkit-user-select: text; }
+.text-object-editor:empty::before { content: 'Type here'; color: #98a2b3; }
+
+.page-image-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.page-image-hit { position: absolute; border-radius: 2px; outline: 1px dashed transparent; pointer-events: auto; cursor: move; touch-action: none; transition: outline-color .12s ease, background-color .12s ease; }
+.page-image-hit:hover { outline-color: rgb(36 84 230 / 70%); background: rgb(36 84 230 / 6%); }
+.page-image-hit.is-locked { cursor: not-allowed; }
+.page-image-hit.is-locked:hover { outline-color: rgb(181 71 8 / 70%); background: rgb(181 71 8 / 6%); }
+.page-image-layer.is-busy .page-image-hit { pointer-events: none; }
+.page-image-mask { position: absolute; z-index: 1; background: #fff; pointer-events: none; }
+.page-image-ghost { position: absolute; z-index: 2; max-width: none; opacity: .92; object-fit: fill; pointer-events: none; box-shadow: 0 6px 18px rgb(16 24 40 / 18%); }
+
+/* Signature dialog */
+.signature-pad { position: relative; height: 200px; border: 1px dashed var(--border-strong); border-radius: var(--radius-lg); background: #fff; touch-action: none; cursor: crosshair; }
+.signature-pad canvas { width: 100%; height: 100%; display: block; }
+.signature-pad .baseline { position: absolute; right: 24px; bottom: 48px; left: 24px; border-bottom: 1px solid #d0d5dd; pointer-events: none; }
+.signature-pad .placeholder { position: absolute; left: 24px; bottom: 54px; color: #98a2b3; font-size: 13px; pointer-events: none; }
+.signature-typed { display: grid; gap: 8px; }
+.signature-choice { display: flex; align-items: center; min-height: 64px; padding: 6px 16px; border: 1px solid var(--border); border-radius: var(--radius); color: #1b2333; background: #fff; font-size: 32px; text-align: left; overflow: hidden; white-space: nowrap; }
+.signature-choice.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.signature-saved { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.signature-saved img, .signature-saved svg { width: 120px; height: 44px; object-fit: contain; background: #fff; border-radius: 4px; }

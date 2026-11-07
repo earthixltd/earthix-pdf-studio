@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 — In-place text editing that keeps the original look
+
+- Click text on the page and type: an in-place editor opens over the original text (same font, size, weight, style, colour); Enter saves, Esc cancels. The side-panel replace form is replaced by a block list that opens the same editor.
+- Edits rewrite the original content-stream operators — no overlay, no duplicate text. Overprinted copies (fake bold / shadow) are updated together.
+- Words after the edit on the same line move by exactly the width change, so longer text no longer overlaps and shorter text leaves no gap. Table cells and other columns stay put (painted borders are detected); overflow past a border or margin is reported.
+- Characters missing from an embedded subset font are drawn with the same font installed on the computer (Chrome/Edge Local Font Access), then a similar installed font, then a standard PDF font. Fallback fonts are subset and embedded with a ToUnicode map, so the text stays searchable.
+- New PDF engine modules: lossless object parser/serializer, tolerant stream filters (Flate, LZW, ASCII85, ASCIIHex, RunLength), broken-xref repair, inherited page resources, full graphics-state interpreter (q/Q, cm, colours, Form XObjects, inline images), multi-object incremental writer.
+- Font decoding now covers Type1/TrueType/Type3 base encodings with Differences and glyph names, standard-14 metrics, and embedded-font cmaps when ToUnicode is missing. Hindi/complex-script and unmappable text is locked with a clear reason instead of being corrupted.
+- 12 new regression tests (124 total).
+
 ## Step 7 compatibility fix — XRef streams and simple fonts
 
 - Added PDF cross-reference stream parsing, including `/W`, `/Index`, `/Prev`, `/XRefStm`, FlateDecode and PNG predictor rows.
