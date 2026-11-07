@@ -11,10 +11,13 @@ test('passes PDFium a WASM password pointer instead of a JavaScript string', () 
   assert.ok(workerSource.includes('passwordAllocation?.release()'))
 })
 
-test('releases the input buffer immediately after the memory load call', () => {
+test('keeps the PDF buffer alive while the document is open and frees it on close', () => {
+  // FPDF_LoadMemDocument reads from the caller's buffer for the document's whole
+  // lifetime; freeing it early made pages render blank or garbled.
   assert.ok(workerSource.includes('FPDF_LoadMemDocument(filePointer, bytes.length, passwordAllocation.pointer)'))
-  assert.ok(workerSource.includes('wasm.wasmExports.free(filePointer)'))
-  assert.ok(!workerSource.includes('filePointer, pageCount'))
+  assert.ok(workerSource.includes('openDocuments.set(documentId, { documentPointer, pageCount, filePointer })'))
+  assert.ok(workerSource.includes('if (!keepBuffer) wasm.wasmExports.free(filePointer)'))
+  assert.ok(workerSource.includes('if (record.filePointer) module.pdfium.wasmExports.free(record.filePointer)'))
 })
 
 test('keeps rendering pointers and PDFium memory in the worker only', () => {

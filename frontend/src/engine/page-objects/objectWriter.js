@@ -469,7 +469,8 @@ export async function writePageObjects(bytes, objects, { fontProvider = null, fl
       preRef = new PdfRef(allocate(), 0)
       postRef = new PdfRef(allocate(), 0)
       const pre = latin1Bytes('q\n')
-      const post = await deflate(latin1Bytes(`Q\n${ops.join('\n')}\n`))
+      // Leading newline: the original contents may not end with whitespace.
+      const post = await deflate(latin1Bytes(`\nQ\n${ops.join('\n')}\n`))
       newObjects.push(
         { num: preRef.num, gen: 0, value: new PdfDict([['Length', pre.length]]), stream: pre },
         { num: postRef.num, gen: 0, value: new PdfDict([['Length', post.length], ['Filter', name('FlateDecode')]]), stream: post },

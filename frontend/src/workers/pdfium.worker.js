@@ -61,6 +61,7 @@ function openDocument({ documentId, data, password }) {
 
   let documentPointer = 0
   let passwordAllocation = null
+  let keepBuffer = false
   try {
     passwordAllocation = createPdfiumPasswordPointer(wasm, password || '')
     wasm.HEAPU8.set(bytes, filePointer)
@@ -78,8 +79,11 @@ function openDocument({ documentId, data, password }) {
       throw new Error('PDFium opened the file but reported no pages.')
     }
 
-    openDocuments.set(documentId, { documentPointer, pageCount })
+    // PDFium reads from this buffer for as long as the document is open, so it
+    // is kept with the document and freed only in closeDocument().
+    openDocuments.set(documentId, { documentPointer, pageCount, filePointer })
     documentPointer = 0
+    keepBuffer = true
     return { documentId, pageCount }
   } finally {
     try {
@@ -88,8 +92,8 @@ function openDocument({ documentId, data, password }) {
       try {
         if (documentPointer) module.FPDF_CloseDocument(documentPointer)
       } finally {
-        // FPDF_LoadMemDocument has consumed the input buffer; it can be freed after loading.
-        wasm.wasmExports.free(filePointer)
+        // Only free the buffer when the document did not open.
+        if (!keepBuffer) wasm.wasmExports.free(filePointer)
       }
     }
   }
@@ -195,6 +199,7 @@ function closeDocument(documentId) {
   try {
     module.FPDF_CloseDocument(record.documentPointer)
   } finally {
+    if (record.filePointer) module.pdfium.wasmExports.free(record.filePointer)
     openDocuments.delete(documentId)
   }
   return { closed: true }
