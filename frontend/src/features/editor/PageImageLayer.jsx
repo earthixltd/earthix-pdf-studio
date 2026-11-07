@@ -110,7 +110,7 @@ export function PageImageLayer({ images, scale, canvas, selectedKey, busy, onSel
         return (
           <div key={`frame-${image.key}`} className={`selection-frame image-frame ${image.editable ? '' : 'is-locked'}`} style={px(rect, scale)}>
             {image.editable && <div className="frame-body" onPointerDown={(event) => begin(event, image)} />}
-            {image.editable && !busy && HANDLES.map((handle) => (
+            {image.editable && !busy && HANDLES.filter((handle) => (rect.height * scale < 26 ? handle.hy === 0 : true) && (rect.width * scale < 26 ? handle.hx === 0 : true)).map((handle) => (
               <span key={handle.id} className={`frame-handle h-${handle.id}`} onPointerDown={(event) => begin(event, image, handle)} />
             ))}
           </div>

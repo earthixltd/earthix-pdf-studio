@@ -37,3 +37,4 @@ frontend/public/pdfjs/
 frontend/public/pdfium/
 frontend/public/fonts/
 frontend/public/image_decoders/
+frontend/public/tesseract/

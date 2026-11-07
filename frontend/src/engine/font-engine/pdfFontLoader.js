@@ -169,6 +169,9 @@ export class PdfFontInfo {
     const mapped = this.toUnicode.get(code)
     // Some writers map unmappable glyphs (e.g. Indic conjuncts) to U+0000.
     if (mapped !== undefined && mapped !== '' && !isControlOnly(mapped)) return mapped
+    // Letters identified from the same font installed on this computer.
+    const recovered = this.recoveredGlyphs?.get(code)
+    if (recovered) return recovered
     if (mapped !== undefined && isControlOnly(mapped)) return null
     const fromEncoding = this.encodingUnicode.get(code)
     if (fromEncoding) return fromEncoding

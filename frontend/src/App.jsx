@@ -3,7 +3,7 @@ import { PDFDocument } from 'pdf-lib'
 import {
   FaBars, FaCheckCircle, FaChevronDown, FaChevronLeft, FaChevronRight, FaColumns, FaCompress, FaDownload, FaEdit,
   FaExclamationCircle, FaExclamationTriangle, FaExpand, FaFileAlt, FaFilePdf, FaHome, FaLayerGroup, FaList, FaMinus,
-  FaMoon, FaPlus, FaPrint, FaRedo, FaSearch, FaSlidersH, FaSpinner, FaSun, FaTh, FaTimes, FaTools, FaUndo, FaUpload,
+  FaMoon, FaPlus, FaSave, FaPrint, FaRedo, FaSearch, FaSlidersH, FaSpinner, FaSun, FaTh, FaTimes, FaTools, FaUndo, FaUpload,
 } from 'react-icons/fa'
 import { createPdfEngine } from './engine/index.js'
 import {
@@ -30,6 +30,8 @@ import { SignatureDialog } from './features/editor/SignatureDialog.jsx'
 import { DEFAULT_TOOL_SETTINGS, inkBounds, moveObject, newId, objectLabel } from './features/editor/objectFactory.js'
 import { fitTextObject, setMeasureFontProvider, subscribeFontLoads } from './features/editor/textMeasure.js'
 import { importImageFile } from './features/editor/imageImport.js'
+import { prepareImageTextEdit, readTextInArea } from './features/editor/imageText.js'
+import { SweetDialogHost, showDialog } from './components/SweetDialog.jsx'
 import './studio.css'
 import './features/editor/editor.css'
 
@@ -39,7 +41,7 @@ const NAV_ITEMS = [
   { id: 'merge', label: 'Merge', icon: FaFileAlt },
   { id: 'split', label: 'Split', icon: FaColumns },
   { id: 'organize', label: 'Pages', icon: FaTh },
-  { id: 'compress', label: 'Optimize', icon: FaCompress },
+  { id: 'compress', label: 'Compress', icon: FaCompress, hint: 'Compress PDF: download a smaller copy that is quicker to share' },
 ]
 const ONE_SHOT_TOOLS = new Set(['text', 'shape', 'note', 'signature', 'image', 'whiteout'])
 const SETTINGS_KEY = 'earthix.toolSettings.v1'
@@ -114,12 +116,18 @@ async function openWithPassword(engine, bytes, fileName, onProgress) {
       return await engine.openDocument(bytes, { fileName, password, onProgress })
     } catch (error) {
       if (error?.code !== 'PASSWORD_REQUIRED') throw error
-      const enteredPassword = window.prompt(`Enter the password for ${fileName}`)
-      if (enteredPassword === null) throw new Error('PDF opening was cancelled because no password was provided.', { cause: error })
-      password = enteredPassword
+      const answer = await showDialog({
+        icon: 'lock',
+        title: attempt ? 'That password didn’t work' : 'This PDF is locked',
+        text: attempt ? 'Please try again.' : `Enter the password for ${fileName}.`,
+        input: { type: 'password', placeholder: 'Password', required: true },
+        confirmText: 'Open',
+      })
+      if (!answer.confirmed) throw new Error('Opening was cancelled.', { cause: error })
+      password = answer.value
     }
   }
-  throw new Error('The PDF password was not accepted after three attempts.')
+  throw new Error('Wrong password.')
 }
 
 async function splitEditableObjects(bytes) {
@@ -156,6 +164,7 @@ function App() {
   const drawSessionRef = useRef(null)
   const clipboardRef = useRef(null)
   const signaturePointRef = useRef(null)
+  const fileHandleRef = useRef(null)
 
   const isMobile = useMediaQuery('(max-width: 767px)')
   const isCompact = useMediaQuery('(max-width: 1023px)')
@@ -201,11 +210,16 @@ function App() {
   const [toolSettings, setToolSettings] = useState(readStoredSettings)
   const [selectedObjectId, setSelectedObjectId] = useState(null)
   const [editingText, setEditingText] = useState(null)
+  const [imageReading, setImageReading] = useState(null)
+  const [pendingPatch, setPendingPatch] = useState(null)
+  const pendingPatchRef = useRef(null)
+  pendingPatchRef.current = pendingPatch
   const [leftTab, setLeftTab] = useState('pages')
   const [showLeft, setShowLeft] = useState(() => typeof window === 'undefined' || window.innerWidth >= 1024)
   const [showRight, setShowRight] = useState(() => typeof window === 'undefined' || window.innerWidth >= 1024)
   const [navOpen, setNavOpen] = useState(false)
   const [exportMenu, setExportMenu] = useState(false)
+  const [sheetExpanded, setSheetExpanded] = useState(false)
   const [signatureOpen, setSignatureOpen] = useState(false)
   const [hintTool, setHintTool] = useState(null)
   const [localFamilies, setLocalFamilies] = useState([])
@@ -217,6 +231,15 @@ function App() {
   const closeToast = useCallback(() => setToast({ message: '', type: '' }), [])
 
   useEffect(() => subscribeFontLoads(bumpFontVersion), [])
+  // If the browser itself is zoomed (pinch on the toolbar etc.), keep handles at their normal size.
+  useEffect(() => {
+    const viewport = window.visualViewport
+    if (!viewport) return undefined
+    const update = () => document.documentElement.style.setProperty('--ui-scale', String(1 / Math.max(0.5, viewport.scale || 1)))
+    update()
+    viewport.addEventListener('resize', update)
+    return () => viewport.removeEventListener('resize', update)
+  }, [])
   useEffect(() => {
     try { globalThis.localStorage?.setItem(SETTINGS_KEY, JSON.stringify(toolSettings)) } catch { /* storage unavailable */ }
   }, [toolSettings])
@@ -234,6 +257,9 @@ function App() {
   useEffect(() => {
     if (isCompact) { setShowLeft(false); setShowRight(false) } else { setShowLeft(true); setShowRight(true) }
   }, [isCompact])
+
+  /** Analyses read unlabelled Hindi letters from installed fonts once font access is allowed. */
+  const inspectionOptions = useCallback(() => (fontProviderRef.current?.status === 'granted' ? { fontProvider: fontProviderRef.current } : {}), [])
 
   const installDocumentCore = useCallback((nextCore) => {
     const previousCore = documentCoreRef.current
@@ -294,7 +320,7 @@ function App() {
       } catch (error) {
         if (!cancelled && error?.code !== 'SEARCH_CANCELLED') {
           setPdfSearchResults([])
-          showToast(error?.message || 'PDF text search failed.', 'error')
+          showToast('Search didn’t work. Try again.', 'error')
         }
       } finally {
         if (!cancelled) setPdfSearchBusy(false)
@@ -346,6 +372,8 @@ function App() {
     setActiveBlock(null)
     setEditingText(null)
     setPreviewObject(null)
+    setImageReading(null)
+    setPendingPatch(null)
   }, [])
 
   /** Replace the whole document (merge, page changes); Earthix items in the file become editable again. */
@@ -367,16 +395,16 @@ function App() {
     const page = Math.max(0, Math.min(nextPage, nextSession.pageCount - 1))
     setCurrentPage(page)
     documentCoreRef.current?.setActivePage(page)
-    applyInspection(await inspectNativePdfText(bytes).catch(() => ({ runs: [], fonts: [] })))
+    applyInspection(await inspectNativePdfText(bytes, inspectionOptions()).catch(() => ({ runs: [], fonts: [] })))
     clearSelections()
     return nextSession
   }, [applyInspection, clearSelections, installDocumentCore, replaceDocumentSession])
 
-  const openPdf = useCallback(async (file) => {
+  const openPdf = useCallback(async (file, handle = null) => {
     if (!file) return
     const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
-    if (!isPdf) { showToast('Please choose a PDF document.', 'error'); return }
-    if (!engineRef.current) { showToast('The PDF engine is still starting. Try again in a moment.', 'error'); return }
+    if (!isPdf) { showToast('Please choose a PDF file.', 'error'); return }
+    if (!engineRef.current) { showToast('Still getting ready — try again in a second.', 'error'); return }
     const operationId = ++openSequenceRef.current
     setProcessing(true)
     setProcessingProgress(0)
@@ -385,7 +413,7 @@ function App() {
       const fileBytes = new Uint8Array(await file.arrayBuffer())
       const { bytes, objects: extracted, found } = await splitEditableObjects(fileBytes)
       if (operationId !== openSequenceRef.current) return
-      const inspectionPromise = inspectNativePdfText(bytes).catch((error) => ({ runs: [], error }))
+      const inspectionPromise = inspectNativePdfText(bytes, inspectionOptions()).catch((error) => ({ runs: [], error }))
       const nextSession = await openWithPassword(engineRef.current, bytes, file.name, ({ loaded, total }) => {
         if (operationId !== openSequenceRef.current) return
         if (Number.isFinite(total) && total > 0) setProcessingProgress(Math.min(100, Math.round((loaded / total) * 100)))
@@ -404,6 +432,7 @@ function App() {
       setZoom(1)
       setZoomMode('width')
       setFileName(file.name)
+      fileHandleRef.current = handle
       setFileSize(file.size)
       setEngineStatus(nextSession.engineStatus)
       setActiveWorkspace('edit')
@@ -418,17 +447,17 @@ function App() {
         if (documentSessionRef.current === nextSession) setEngineStatus(nextSession.engineStatus)
       })
       setRecentFiles((previous) => [
-        { name: file.name, size: file.size, sizeLabel: formatBytes(file.size), file, openedAt: new Date().toISOString() },
+        { name: file.name, size: file.size, sizeLabel: formatBytes(file.size), file, handle, openedAt: new Date().toISOString() },
         ...previous.filter((item) => item.name !== file.name),
       ].slice(0, 10))
-      if (inspection.error) showToast(`${file.name} opened, but its text cannot be edited: ${inspection.error.message}`, 'warning')
-      else if (!inspection.blocks?.length) showToast(`${file.name} opened. No editable text was found — the pages may be scanned images. You can still add text, images and markup.`, 'warning')
-      else if (found) showToast(`${file.name} opened. ${extracted.length} item${extracted.length === 1 ? '' : 's'} added earlier in Earthix can be adjusted again.`)
-      else showToast(`${file.name} opened.`)
+      if (inspection.error) showToast('Opened. The text in this PDF can’t be edited, but you can add to it.', 'warning')
+      else if (!inspection.blocks?.length) showToast('Opened. This looks scanned, so its text can’t be edited — you can still add to it.', 'warning')
+      else if (found) showToast(`Opened. ${extracted.length} item${extracted.length === 1 ? '' : 's'} you added can be edited again.`)
+      else showToast('PDF opened.')
     } catch (error) {
       if (operationId === openSequenceRef.current) {
         setEngineError(error?.message || 'The selected PDF could not be opened.')
-        showToast(`Could not open PDF: ${error?.message || 'Unknown error'}`, 'error')
+        showToast('Couldn’t open this PDF.', 'error')
       }
     } finally {
       if (operationId === openSequenceRef.current) {
@@ -439,9 +468,20 @@ function App() {
     }
   }, [applyInspection, clearSelections, installDocumentCore, showToast])
 
+  /** Open with the system file picker when available so Save can write back to the same file. */
+  const openFromPicker = useCallback(async () => {
+    if (typeof window.showOpenFilePicker !== 'function') { fileInputRef.current?.click(); return }
+    try {
+      const [handle] = await window.showOpenFilePicker({ types: [{ description: 'PDF document', accept: { 'application/pdf': ['.pdf'] } }], multiple: false })
+      if (handle) await openPdf(await handle.getFile(), handle)
+    } catch (error) {
+      if (error?.name !== 'AbortError') fileInputRef.current?.click()
+    }
+  }, [openPdf])
+
   const requireDocument = useCallback(() => {
     if (!documentSessionRef.current || !documentCoreRef.current) {
-      showToast('Open a PDF document first.', 'error')
+      showToast('Open a PDF first.', 'error')
       return false
     }
     return true
@@ -477,6 +517,8 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [hintTool])
 
+  const imageReadingRef = useRef(null)
+  imageReadingRef.current = imageReading
   const objectsRef = useRef(objects)
   objectsRef.current = objects
   const maxZ = () => objectsRef.current.reduce((max, object) => Math.max(max, object.z ?? 0), 0)
@@ -488,7 +530,7 @@ function App() {
       await core.execute(command)
       return true
     } catch (error) {
-      showToast(error?.message || 'The change could not be applied.', 'error')
+      showToast(error?.message || 'That didn’t work. Please try again.', 'error')
       return false
     }
   }, [showToast])
@@ -511,7 +553,9 @@ function App() {
 
   const removeObject = useCallback(async (object) => {
     if (!object) return
-    if (await runObjectCommand(new SetPageObjectsCommand({ remove: [object.id] }, { label: `Delete ${objectLabel(object).toLowerCase()}` }))) {
+    // Removing edited image text also removes its cover, so the original shows again.
+    const ids = [object.id, ...(object.imageTextPatchId && objectsRef.current.some((item) => item.id === object.imageTextPatchId) ? [object.imageTextPatchId] : [])]
+    if (await runObjectCommand(new SetPageObjectsCommand({ remove: ids }, { label: `Delete ${objectLabel(object).toLowerCase()}` }))) {
       setSelectedObjectId((id) => (id === object.id ? null : id))
     }
   }, [runObjectCommand])
@@ -559,6 +603,25 @@ function App() {
 
   const commitTextEdit = useCallback(async (object, text) => {
     setEditingText(null)
+    if (object.isNew && object.imageTextPatchId) {
+      const patch = pendingPatchRef.current
+      setPendingPatch(null)
+      if (!patch || text === object.originalText) return
+      const z = objectsRef.current.reduce((max, item) => Math.max(max, item.z ?? 0), 0)
+      const upsert = [{ ...patch, z: z + 1 }]
+      let created = null
+      if (text.trim()) {
+        created = fitTextObject({ ...object, text, z: z + 2 })
+        delete created.isNew
+        upsert.push(created)
+      }
+      if (await runObjectCommand(new SetPageObjectsCommand({ upsert }, { label: text.trim() ? 'Edit text in image' : 'Remove text from image' }))) {
+        if (created) setSelectedObjectId(created.id)
+        setImageReading((reading) => (reading ? { ...reading, lines: reading.lines.filter((line) => line.text !== object.originalText || line.used) } : reading))
+        showToast(text.trim() ? 'Image text updated.' : 'Text removed from the image.')
+      }
+      return
+    }
     if (object.isNew) {
       if (text.trim()) {
         const created = fitTextObject({ ...object, text })
@@ -572,7 +635,41 @@ function App() {
     if (text === object.text) return
     if (!text.trim()) { await removeObject(object); return }
     await updateObject({ ...object, text }, 'Edit text')
-  }, [createObject, removeObject, tool, updateObject])
+  }, [createObject, removeObject, runObjectCommand, showToast, tool, updateObject])
+
+  /** Read the text inside a picture so it can be edited in place. */
+  const readImageText = useCallback(async ({ pageIndex, rect, key, overlayImage = null }) => {
+    const session = documentSessionRef.current
+    if (!session) return
+    setImageReading({ key, pageIndex, status: 'reading', lines: [] })
+    try {
+      const reading = await readTextInArea(session, pageIndex, rect, overlayImage)
+      if (!reading.lines.length) {
+        setImageReading(null)
+        showToast('No text found in this image.', 'warning')
+        return
+      }
+      setImageReading({ key, pageIndex, status: 'ready', lines: reading.lines, reading })
+      showToast('Tap the text you want to change.')
+    } catch {
+      setImageReading(null)
+      showToast('Couldn’t read the text in this image.', 'error')
+    }
+  }, [showToast])
+
+  const startImageTextEdit = useCallback(async (line) => {
+    const current = imageReadingRef.current
+    if (!current?.reading) return
+    try {
+      const { patch, text } = await prepareImageTextEdit(current.reading, line, current.pageIndex)
+      setSelectedObjectId(null)
+      setSelectedImageKey(null)
+      setPendingPatch(patch)
+      setEditingText(text)
+    } catch {
+      showToast('Couldn’t prepare this text for editing.', 'error')
+    }
+  }, [showToast])
 
   const placeImageObject = useCallback(async (image, { point = null, pageIndex = currentPage, label = 'Add image', signature = false } = {}) => {
     const info = await documentSessionRef.current?.getPageInfo?.(pageIndex).catch(() => null)
@@ -604,18 +701,55 @@ function App() {
   pdfBusyRef.current = pdfBusy
   nativeBlocksRef.current = nativeBlocks
 
+  const activateBlockRef = useRef(null)
+  /** Hindi text with unlabelled letters: read them from the installed font, then edit. */
+  const unlockIndicBlock = async (block, clickPoint) => {
+    const provider = fontProviderRef.current
+    if (provider.status !== 'granted') {
+      const answer = await showDialog({
+        icon: 'font',
+        title: 'Read this Hindi text?',
+        text: 'Earthix needs your computer’s fonts to read and edit it. Nothing leaves your device.',
+        confirmText: 'Use my fonts',
+        cancelText: 'Not now',
+      })
+      if (!answer.confirmed) return
+    }
+    const entries = await provider.prepare()
+    setLocalFontStatus(provider.status)
+    if (!entries.length) {
+      showToast('Font access is off, so this Hindi text can’t be read.', 'warning')
+      return
+    }
+    const core = documentCoreRef.current
+    if (!core) return
+    const inspection = await inspectNativePdfText(core.getWorkingBytes(), { fontProvider: provider }).catch(() => null)
+    if (!inspection) return
+    applyInspection(inspection)
+    nativeBlocksRef.current = inspection.blocks || []
+    const next = findBlockNearPoint(inspection.blocks || [], block.pageIndex, block.startPoint, 2)
+    if (next?.editable) activateBlockRef.current?.(next, clickPoint)
+    else showToast(next?.reason || 'Couldn’t read this Hindi text with your fonts.', 'warning')
+  }
+
   const activateBlock = useCallback((block, clickPoint = null) => {
     if (!block) return
     setSelectedBlockKey(block.key)
     setSelectedImageKey(null)
     setSelectedObjectId(null)
-    if (!block.editable) { showToast(block.reason || 'This text cannot be edited.', 'warning'); return }
+    if (!block.editable) {
+      if (block.reasonCode === 'needs-installed-font' && fontProviderRef.current?.supported) { void unlockIndicBlock(block, clickPoint); return }
+      showToast(block.reason || 'This text can’t be edited.', 'warning')
+      return
+    }
     setCurrentPage(block.pageIndex)
     setActiveClickPoint(clickPoint)
     setEditorDraft(block.text)
     setActiveBlock(block)
     if (isCompact) setShowRight(true)
   }, [isCompact, showToast])
+
+  activateBlockRef.current = activateBlock
 
   const runPendingActivation = useCallback((blocks) => {
     const pending = pendingActivationRef.current
@@ -682,7 +816,7 @@ function App() {
         try { await core.undo() } catch { /* already reported */ }
       }
       pendingActivationRef.current = null
-      showToast(error?.message || 'The change could not be applied.', 'error')
+      showToast(error?.message || 'That didn’t work. Please try again.', 'error')
       pdfBusyRef.current = false
       setPdfBusy(false)
       return null
@@ -691,13 +825,11 @@ function App() {
 
   const fontToast = useCallback((plan, warnings = [], base) => {
     const fontAccess = fontProviderRef.current?.status
-    const message = plan?.kind !== 'fallback'
+    const message = plan?.kind !== 'fallback' || plan.match === 'exact'
       ? base
-      : plan.match === 'exact'
-        ? `${base} New letters use ${plan.label} from this computer — the same font as the PDF.`
-        : fontAccess === 'unsupported' || fontAccess === 'denied'
-          ? `${base} ${plan.label} was used as the closest match. Open this editor in Chrome or Edge and allow font access to use the exact font.`
-          : `${base} ${plan.label} was used because the original font is not installed.`
+      : fontAccess === 'unsupported' || fontAccess === 'denied'
+        ? `${base} Used ${plan.label} — allow font access for an exact match.`
+        : `${base} Used ${plan.label}, the closest match.`
     showToast([message, ...warnings].join(' '), (plan?.kind === 'fallback' && plan.match !== 'exact') || warnings.length ? 'warning' : '')
   }, [showToast])
 
@@ -708,7 +840,7 @@ function App() {
     await runPdfCommand(new ReplaceNativeTextBlockCommand(block, text, { fontProvider }), {
       onResult: (result) => {
         if (result.block) setSelectedBlockKey(result.block.key)
-        fontToast(result.fontPlan, result.warnings, 'Text updated in its original font, size and colour.')
+        fontToast(result.fontPlan, result.warnings, 'Text updated.')
       },
     })
   }, [fontToast, runPdfCommand])
@@ -720,23 +852,29 @@ function App() {
     await runPdfCommand(new TransformPdfBytesCommand((bytes) => restyleNativeTextBlock(bytes, reference, style, { fontProvider }), { label: 'Change text style', pageIndex: block.pageIndex }), {
       onResult: (result) => {
         if (result.block) setSelectedBlockKey(result.block.key)
-        fontToast(result.fontPlan, result.warnings, 'Text style updated.')
+        fontToast(result.fontPlan, result.warnings, 'Style updated.')
       },
     })
   }, [fontToast, runPdfCommand])
 
   const editImage = useCallback(async (image, operation, label) => {
-    await runPdfCommand(new TransformPdfBytesCommand((bytes) => editPageImage(bytes, image, operation), { label, pageIndex: image.pageIndex }), {
+    await runPdfCommand(new TransformPdfBytesCommand((bytes) => editPageImage(bytes, image, operation, inspectionOptions()), { label, pageIndex: image.pageIndex }), {
       onResult: (result) => {
         setSelectedImageKey(result.image?.key || null)
-        showToast(operation.type === 'delete' ? 'Image removed from the page.' : 'Image updated in the PDF.')
+        showToast(operation.type === 'delete' ? 'Image removed.' : 'Image updated.')
       },
     })
   }, [runPdfCommand, showToast])
 
   const handlePageImageAction = useCallback((image, operation) => {
     if (operation.type === 'replace' && !operation.data) { chooseImage({ kind: 'page', image }); return }
+    if (operation.type === 'read-text') { void readImageText({ pageIndex: image.pageIndex, rect: image.viewRect, key: image.key }); return }
     const labels = { transform: 'Move image', delete: 'Delete image', opacity: 'Change image opacity', replace: 'Replace image' }
+    if (operation.type === 'delete') {
+      void showDialog({ icon: 'delete', title: 'Delete this image?', text: 'You can bring it back with Undo.', confirmText: 'Delete' })
+        .then((answer) => { if (answer.confirmed) void editImage(image, operation, labels.delete) })
+      return
+    }
     void editImage(image, operation, labels[operation.type])
   }, [chooseImage, editImage])
 
@@ -756,7 +894,7 @@ function App() {
         await placeImageObject(image)
       }
     } catch (error) {
-      showToast(error?.message || 'The picture could not be added.', 'error')
+      showToast(error?.message || 'Couldn’t add that picture.', 'error')
     } finally {
       if (imageInputRef.current) imageInputRef.current.value = ''
     }
@@ -781,6 +919,15 @@ function App() {
   const savePdf = async ({ flatten = false } = {}) => {
     if (!requireDocument()) return
     setExportMenu(false)
+    if (flatten) {
+      const answer = await showDialog({
+        icon: 'layers',
+        title: 'Download a flattened copy?',
+        text: 'Everything you added becomes part of the page and can’t be edited later.',
+        confirmText: 'Download',
+      })
+      if (!answer.confirmed) return
+    }
     setSaving(true)
     try {
       const core = documentCoreRef.current
@@ -791,9 +938,56 @@ function App() {
       const outputName = `${fileName.replace(/\.pdf$/i, '')}${wasDirty || flatten ? '-edited' : ''}.pdf`
       downloadPdf(bytes, outputName)
       await core.markSaved()
-      showToast([flatten ? 'Flattened PDF downloaded. Added items are now part of the pages.' : 'PDF downloaded. Added items stay adjustable when you open it in Earthix again.', ...warnings].join(' '), warnings.length ? 'warning' : '')
+      showToast([flatten ? 'Flattened copy downloaded.' : 'Copy downloaded.', ...warnings].join(' '), warnings.length ? 'warning' : '')
+    } catch {
+      showToast('Couldn’t download the PDF. Please try again.', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** Save the edits into the opened file itself (Chrome/Edge), or ask where to save. */
+  const saveChanges = async () => {
+    if (!requireDocument()) return
+    setExportMenu(false)
+    setSaving(true)
+    try {
+      const core = documentCoreRef.current
+      await core.validateForExport({ expectedPageCount: documentSession?.pageCount })
+      let handle = fileHandleRef.current
+      if (!handle && typeof window.showSaveFilePicker === 'function') {
+        handle = await window.showSaveFilePicker({ suggestedName: fileName.toLowerCase().endsWith('.pdf') ? fileName : `${fileName}.pdf`, types: [{ description: 'PDF document', accept: { 'application/pdf': ['.pdf'] } }] })
+      }
+      if (handle?.queryPermission && (await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
+        // First save into this file: explain in our own popup; the browser then confirms once.
+        if (fileHandleRef.current === handle) {
+          const answer = await showDialog({
+            icon: 'save',
+            title: `Save changes to ${handle.name || fileName}?`,
+            text: 'Your edits will be saved into this file. Your browser asks for permission just once.',
+            confirmText: 'Save changes',
+          })
+          if (!answer.confirmed) return
+        }
+        if ((await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') throw new Error('Saving was not allowed.')
+      }
+      const { bytes, warnings } = await buildOutputBytes()
+      await PDFDocument.load(bytes, { updateMetadata: false })
+      if (handle?.createWritable) {
+        const writable = await handle.createWritable()
+        await writable.write(bytes)
+        await writable.close()
+        fileHandleRef.current = handle
+        if (handle.name && handle.name !== fileName) setFileName(handle.name)
+        await core.markSaved()
+        showToast([`Saved to ${handle.name || fileName}.`, ...warnings].join(' '), warnings.length ? 'warning' : '')
+      } else {
+        downloadPdf(bytes, fileName.toLowerCase().endsWith('.pdf') ? fileName : `${fileName}.pdf`)
+        await core.markSaved()
+        showToast(['Saved as a download.', ...warnings].join(' '), warnings.length ? 'warning' : '')
+      }
     } catch (error) {
-      showToast(`Could not export PDF: ${error?.message || 'Unknown error'}`, 'error')
+      if (error?.name !== 'AbortError') showToast('Couldn’t save. Please try again.', 'error')
     } finally {
       setSaving(false)
     }
@@ -805,7 +999,7 @@ function App() {
     const snapshot = core.getSnapshot()
     const bytes = core.getWorkingBytes()
     if (sameBytes(bytes, originalPdfBytesRef.current) && snapshot.pageCount === documentSessionRef.current?.pageCount) return snapshot
-    const inspectionPromise = inspectNativePdfText(bytes).catch((error) => ({ runs: [], error }))
+    const inspectionPromise = inspectNativePdfText(bytes, inspectionOptions()).catch((error) => ({ runs: [], error }))
     await replaceDocumentSession(bytes, snapshot.fileName)
     originalPdfBytesRef.current = bytes.slice()
     setFileName(snapshot.fileName)
@@ -828,20 +1022,20 @@ function App() {
       await refreshViewerFromDocumentCore()
       const ids = new Set(core.objects.list().map((object) => object.id))
       setSelectedObjectId((id) => (id && ids.has(id) ? id : null))
-    } catch (error) {
+    } catch {
       try {
         await core[action === 'undo' ? 'redo' : 'undo']()
         await refreshViewerFromDocumentCore()
-      } catch (restoreError) {
-        showToast(`History recovery failed: ${restoreError.message}`, 'error')
+      } catch {
+        showToast('Something went wrong with undo. Please reopen the file.', 'error')
       }
-      showToast(`Could not ${action} the change: ${error.message}`, 'error')
+      showToast(action === 'undo' ? 'Couldn’t undo that.' : 'Couldn’t redo that.', 'error')
     }
   }, [refreshViewerFromDocumentCore, showToast])
 
   const mergePdfs = async (files) => {
     if (!files?.length) return
-    if (files.length < 2) { showToast('Select at least two PDF files to merge.', 'error'); return }
+    if (files.length < 2) { showToast('Pick at least two PDFs to merge.', 'error'); return }
     setProcessing(true)
     try {
       const output = await PDFDocument.create()
@@ -853,11 +1047,12 @@ function App() {
         copied.forEach((page) => output.addPage(page))
       }
       const bytes = new Uint8Array(await output.save({ useObjectStreams: true }))
+      fileHandleRef.current = null
       await commitPdfBytes(bytes, 'Merged-Document.pdf', 0)
       setActiveWorkspace('edit')
-      showToast('Merged ' + files.length + ' PDF documents into one file.')
-    } catch (error) {
-      showToast('Merge failed: ' + (error?.message || 'Unknown error'), 'error')
+      showToast(files.length + ' PDFs merged.')
+    } catch {
+      showToast('Couldn’t merge these files.', 'error')
     } finally {
       setProcessing(false)
       if (mergeInputRef.current) mergeInputRef.current.value = ''
@@ -869,7 +1064,7 @@ function App() {
     const from = Number(splitFrom)
     const to = Number(splitTo)
     if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from || to > pageCount) {
-      showToast('Enter a valid page range between 1 and ' + pageCount + '.', 'error')
+      showToast('Pick pages between 1 and ' + pageCount + '.', 'error')
       return
     }
     setProcessing(true)
@@ -879,9 +1074,9 @@ function App() {
       const copied = await output.copyPages(source, Array.from({ length: to - from + 1 }, (_, index) => from - 1 + index))
       copied.forEach((page) => output.addPage(page))
       downloadPdf(await output.save({ useObjectStreams: true }), fileName.replace(/\.pdf$/i, '') + '-pages-' + from + '-' + to + '.pdf')
-      showToast('Pages ' + from + '–' + to + ' exported as a separate PDF.')
-    } catch (error) {
-      showToast('Split failed: ' + (error?.message || 'Unknown error'), 'error')
+      showToast('Pages ' + from + '–' + to + ' downloaded.')
+    } catch {
+      showToast('Couldn’t split the PDF.', 'error')
     } finally {
       setProcessing(false)
     }
@@ -894,9 +1089,9 @@ function App() {
       const bytes = await applyPagePlanToPdf((await buildOutputBytes()).bytes, pagePlan)
       await commitPdfBytes(bytes, fileName, 0)
       setActiveWorkspace('organize')
-      showToast('Page changes applied to the PDF.')
-    } catch (error) {
-      showToast('Could not apply page changes: ' + (error?.message || 'Unknown error'), 'error')
+      showToast('Pages updated.')
+    } catch {
+      showToast('Couldn’t update the pages.', 'error')
     } finally {
       setProcessing(false)
     }
@@ -909,11 +1104,11 @@ function App() {
       const input = (await buildOutputBytes()).bytes
       const source = await PDFDocument.load(input)
       const bytes = await source.save({ useObjectStreams: true, addDefaultPage: false })
-      downloadPdf(bytes, fileName.replace(/\.pdf$/i, '') + '-optimized.pdf')
+      downloadPdf(bytes, fileName.replace(/\.pdf$/i, '') + '-compressed.pdf')
       const reduction = Math.round((1 - bytes.byteLength / input.byteLength) * 100)
-      showToast(reduction > 0 ? 'Optimized copy downloaded (' + reduction + '% smaller).' : 'Optimized copy downloaded. The file was already compact.')
-    } catch (error) {
-      showToast('Optimization failed: ' + (error?.message || 'Unknown error'), 'error')
+      showToast(reduction > 0 ? 'Smaller copy downloaded — ' + reduction + '% lighter.' : 'Copy downloaded. It was already small.')
+    } catch {
+      showToast('Couldn’t compress this PDF.', 'error')
     } finally {
       setProcessing(false)
     }
@@ -926,13 +1121,13 @@ function App() {
     setActiveWorkspace(id)
   }
 
-  const handleViewerError = useCallback((error) => {
+  const handleViewerError = useCallback(() => {
     if (awaitingRenderRef.current) {
       awaitingRenderRef.current = false
       setActiveBlock(null)
       setPdfBusy(false)
     }
-    showToast(error?.message || 'This page could not be shown.', 'error')
+    showToast('This page couldn’t be shown.', 'error')
   }, [showToast])
 
   const changeZoom = (amount) => {
@@ -944,19 +1139,21 @@ function App() {
     event.preventDefault()
     setDragging(false)
     const files = Array.from(event.dataTransfer?.files || [])
+    const pdfItem = [...(event.dataTransfer?.items || [])].find((item) => item.kind === 'file' && item.type === 'application/pdf')
+    const handlePromise = pdfItem?.getAsFileSystemHandle ? pdfItem.getAsFileSystemHandle().catch(() => null) : Promise.resolve(null)
     const pdf = files.find((item) => item.type === 'application/pdf' || item.name.toLowerCase().endsWith('.pdf'))
     const picture = files.find((item) => item.type.startsWith('image/'))
-    if (pdf) void openPdf(pdf)
+    if (pdf) void handlePromise.then((handle) => openPdf(pdf, handle?.kind === 'file' ? handle : null))
     else if (picture && documentSession) { imageTargetRef.current = { kind: 'new' }; void handleImageFile(picture) }
-    else showToast('Drop a PDF to open it, or a picture to add it to the page.', 'error')
+    else showToast('Drop a PDF or a picture here.', 'error')
   }
 
   const loadLocalFonts = useCallback(async () => {
     const provider = fontProviderRef.current
-    if (!provider?.supported) { showToast('This browser cannot list installed fonts. Open Earthix in Chrome or Edge to use your computer’s fonts.', 'warning'); return }
+    if (!provider?.supported) { showToast('Your fonts work in Chrome or Edge.', 'warning'); return }
     const entries = await provider.prepare()
     setLocalFontStatus(provider.status)
-    if (!entries.length) { showToast('Font access was not allowed. Only standard PDF fonts can be used.', 'warning'); return }
+    if (!entries.length) { showToast('Font access is off, so only the standard fonts are listed.', 'warning'); return }
     setLocalFamilies([...new Set(entries.map((entry) => entry.family).filter(Boolean))].sort((a, b) => a.localeCompare(b)))
   }, [showToast])
 
@@ -980,7 +1177,7 @@ function App() {
       const typing = target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
       const mod = event.ctrlKey || event.metaKey
       const key = event.key.toLowerCase()
-      if (mod && key === 's') { event.preventDefault(); if (documentSessionRef.current) void savePdfRef.current() ; return }
+      if (mod && key === 's') { event.preventDefault(); if (documentSessionRef.current) void savePdfRef.current(); return }
       if (typing) return
       if (mod && key === 'z') { event.preventDefault(); void runHistoryAction(event.shiftKey ? 'redo' : 'undo'); return }
       if (mod && key === 'y') { event.preventDefault(); void runHistoryAction('redo'); return }
@@ -1024,8 +1221,8 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [activeWorkspace, chooseImage, clearSelections, createObject, duplicateObject, removeObject, runHistoryAction, setTool, updateObject])
 
-  const savePdfRef = useRef(savePdf)
-  savePdfRef.current = savePdf
+  const savePdfRef = useRef(saveChanges)
+  savePdfRef.current = saveChanges
   const changeZoomRef = useRef(changeZoom)
   changeZoomRef.current = changeZoom
   const selectedObjectRef = useRef(null)
@@ -1059,6 +1256,7 @@ function App() {
   useEffect(() => {
     if (!isMobile) return
     setShowRight(Boolean(selection))
+    setSheetExpanded(false)
   }, [isMobile, selectedObjectId, selectedBlockKey, selectedImageKey])
 
   const objectCountByPage = useMemo(() => {
@@ -1077,7 +1275,7 @@ function App() {
       ? { label: 'Autosave unavailable', tone: 'error' }
       : documentCoreState.isDirty
         ? { label: documentCoreState.autosaveStatus === 'saving' ? 'Saving locally…' : 'Edited · not exported', tone: 'dirty' }
-        : { label: 'No unsaved changes', tone: '' }
+        : { label: 'All changes saved', tone: '' }
 
   const objectActions = useMemo(() => ({
     update: (object, label) => void updateObject(object, label),
@@ -1086,6 +1284,7 @@ function App() {
     duplicate: (object) => void duplicateObject(object),
     arrange: (object, direction) => void arrangeObject(object, direction),
     replaceImage: (object) => chooseImage({ kind: 'object', object }),
+    readImageText: (object) => void readImageText({ pageIndex: object.pageIndex, rect: { x: object.x, y: object.y, width: object.width, height: object.height }, key: object.id, overlayImage: object }),
   }), [arrangeObject, chooseImage, duplicateObject, removeObject, updateObject])
 
   const localFonts = { families: localFamilies, supported: fontProviderRef.current?.supported, status: localFontStatus, onLoad: () => void loadLocalFonts() }
@@ -1138,12 +1337,28 @@ function App() {
           onTransform={(image, to) => void editImage(image, { type: 'transform', from: image.viewRect, to }, 'Move image')}
         />
       )}
+      {imageReading && imageReading.pageIndex === pageIndex && (
+        <div className="image-text-layer">
+          {imageReading.status === 'reading' && <div className="image-text-status"><FaSpinner className="spin" /> Reading text in the image…</div>}
+          {imageReading.status === 'ready' && imageReading.lines.map((line) => (
+            <button
+              key={line.id}
+              type="button"
+              className="image-text-line"
+              title={`Edit “${line.text}”`}
+              style={{ left: `${line.rect.x * scale - 2}px`, top: `${line.rect.y * scale - 2}px`, width: `${line.rect.width * scale + 4}px`, height: `${line.rect.height * scale + 4}px` }}
+              onPointerDown={(event) => { event.stopPropagation(); event.preventDefault(); void startImageTextEdit(line) }}
+            />
+          ))}
+          {imageReading.status === 'ready' && <button type="button" className="image-text-done" onClick={() => { setImageReading(null); setPendingPatch(null) }}>Done</button>}
+        </div>
+      )}
       <ObjectLayer
         pageIndex={pageIndex}
         scale={scale}
         pageWidth={viewport.width / scale}
         pageHeight={viewport.height / scale}
-        objects={pageObjects}
+        objects={pendingPatch && pendingPatch.pageIndex === pageIndex ? [...pageObjects, { ...pendingPatch, z: 1e9 }] : pageObjects}
         tool={tool}
         settings={toolSettings}
         selectedId={selectedObjectId}
@@ -1200,14 +1415,14 @@ function App() {
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon
             return (
-              <button key={item.id} type="button" className={`rail-item ${item.id === activeWorkspace ? 'active' : ''}`} onClick={() => void handleNav(item.id)}>
+              <button key={item.id} type="button" className={`rail-item ${item.id === activeWorkspace ? 'active' : ''}`} title={item.hint || item.label} onClick={() => void handleNav(item.id)}>
                 <Icon /><span>{item.label}</span>
               </button>
             )
           })}
         </nav>
         <div className="rail-bottom">
-          <button type="button" className="rail-item" onClick={() => { setNavOpen(false); fileInputRef.current?.click() }}><FaUpload /><span>Open</span></button>
+          <button type="button" className="rail-item" onClick={() => { setNavOpen(false); void openFromPicker() }}><FaUpload /><span>Open</span></button>
           <button type="button" className="rail-item" onClick={toggleTheme} title="Switch light / dark theme">{effectiveTheme === 'dark' ? <FaSun /> : <FaMoon />}<span>{effectiveTheme === 'dark' ? 'Light' : 'Dark'}</span></button>
         </div>
       </aside>
@@ -1220,7 +1435,7 @@ function App() {
             <div className="doc-chip" title={fileName}>
               <FaFilePdf />
               <span>{fileName}</span>
-              <button type="button" className="icon-btn sm" onClick={() => fileInputRef.current?.click()} title="Open another PDF" aria-label="Open another PDF"><FaPlus /></button>
+              <button type="button" className="icon-btn sm" onClick={() => void openFromPicker()} title="Open another PDF" aria-label="Open another PDF"><FaPlus /></button>
             </div>
           </div>
           <div className="header-right">
@@ -1228,17 +1443,21 @@ function App() {
             {editingWorkspace && <button type="button" className="icon-btn only-mobile" title="Undo" onClick={() => void runHistoryAction('undo')} disabled={!documentCoreState?.canUndo || pdfBusy}><FaUndo /></button>}
             {editingWorkspace && <button type="button" className="icon-btn only-mobile" title="Redo" onClick={() => void runHistoryAction('redo')} disabled={!documentCoreState?.canRedo || pdfBusy}><FaRedo /></button>}
             <div className="menu-wrap">
-              <div style={{ display: 'flex', gap: 2 }}>
-                <button className="btn btn-primary" type="button" onClick={() => void savePdf()} disabled={!documentSession || saving || processing} title="Download the edited PDF (Ctrl+S)">
-                  {saving ? <FaSpinner className="spin" /> : <FaDownload />}<span>{saving ? 'Exporting…' : 'Export PDF'}</span>
+              <div className="save-group">
+                <button className="btn btn-primary" type="button" onClick={() => void saveChanges()} disabled={!documentSession || saving || processing} title="Save the changes into the PDF file (Ctrl+S)">
+                  {saving ? <FaSpinner className="spin" /> : <FaSave />}<span>{saving ? 'Saving…' : 'Save'}</span>
                 </button>
-                <button className="btn btn-secondary hide-mobile" type="button" style={{ width: 34, padding: 0 }} onClick={() => setExportMenu((value) => !value)} disabled={!documentSession} aria-label="More export options"><FaChevronDown /></button>
+                <button className="btn btn-secondary" type="button" onClick={() => void savePdf()} disabled={!documentSession || saving || processing} title="Download a copy of the edited PDF">
+                  <FaDownload /><span>Export</span>
+                </button>
+                <button className="btn btn-secondary menu-toggle" type="button" onClick={() => setExportMenu((value) => !value)} disabled={!documentSession} aria-label="More save and export options"><FaChevronDown /></button>
               </div>
               {exportMenu && (
                 <>
                   <div style={{ position: 'fixed', inset: 0, zIndex: 50 }} onClick={() => setExportMenu(false)} />
                   <div className="menu">
-                    <button type="button" onClick={() => void savePdf()}><FaDownload /><div>Download PDF<small>Added items stay adjustable in Earthix</small></div></button>
+                    <button type="button" onClick={() => void saveChanges()}><FaSave /><div>Save<small>Write the changes into the PDF file</small></div></button>
+                    <button type="button" onClick={() => void savePdf()}><FaDownload /><div>Download a copy<small>Added items stay adjustable in Earthix</small></div></button>
                     <button type="button" onClick={() => void savePdf({ flatten: true })}><FaLayerGroup /><div>Download flattened PDF<small>Merge every added item into the pages</small></div></button>
                     <hr />
                     <button type="button" onClick={() => { setExportMenu(false); window.print() }}><FaPrint /><div>Print</div></button>
@@ -1265,18 +1484,18 @@ function App() {
           </section>
         )}
 
-        <section className="workspace">
+        <section className={`workspace ${showRight ? 'right-open' : ''}`}>
           {activeWorkspace === 'home' ? (
             <HomeWorkspace
-              onOpenPdf={() => fileInputRef.current?.click()}
+              onOpenPdf={() => void openFromPicker()}
               onMerge={() => mergeInputRef.current?.click()}
               recentFiles={recentFiles}
-              onOpenRecent={(item) => (item.file ? void openPdf(item.file) : showToast('This recent file is no longer available in this browser session.', 'error'))}
+              onOpenRecent={(item) => (item.file ? void openPdf(item.file, item.handle || null) : showToast('That file isn’t available any more. Please open it again.', 'error'))}
               pageCount={pageCount}
               fileName={documentSession ? fileName : ''}
             />
           ) : activeWorkspace === 'split' ? (
-            <SplitWorkspace pageCount={pageCount} fileName={fileName} fromPage={splitFrom} toPage={splitTo} setFromPage={setSplitFrom} setToPage={setSplitTo} onSplit={() => void splitPdf()} processing={processing} onOpenPdf={() => fileInputRef.current?.click()} />
+            <SplitWorkspace pageCount={pageCount} fileName={fileName} fromPage={splitFrom} toPage={splitTo} setFromPage={setSplitFrom} setToPage={setSplitTo} onSplit={() => void splitPdf()} processing={processing} onOpenPdf={() => void openFromPicker()} />
           ) : activeWorkspace === 'organize' ? (
             <OrganizeWorkspace
               session={documentSession}
@@ -1289,7 +1508,7 @@ function App() {
               onReset={() => setPagePlan(createPagePlan(pageCount))}
               changed={pagePlanChanged}
               processing={processing}
-              onOpenPdf={() => fileInputRef.current?.click()}
+              onOpenPdf={() => void openFromPicker()}
             />
           ) : (
             <>
@@ -1335,7 +1554,7 @@ function App() {
                           <div key={pageIndex}>
                             <p className="list-heading"><span>Page {pageIndex + 1}</span></p>
                             <div className="list-stack">
-                              {objects.filter((object) => object.pageIndex === pageIndex).sort((a, b) => (b.z ?? 0) - (a.z ?? 0)).map((object) => (
+                              {objects.filter((object) => object.pageIndex === pageIndex && !object.imageTextPatch).sort((a, b) => (b.z ?? 0) - (a.z ?? 0)).map((object) => (
                                 <button type="button" key={object.id} className={`list-item ${object.id === selectedObjectId ? 'active' : ''}`} onClick={() => { setPage(pageIndex); setTool('select'); setSelectedObjectId(object.id); if (isCompact) setShowLeft(false) }}>
                                   <span className="li-text">
                                     <strong>{object.type === 'text' ? object.text.split('\n')[0] || 'Text' : object.type === 'note' ? object.text || 'Comment' : object.type === 'highlight' && object.text ? object.text : objectLabel(object)}</strong>
@@ -1364,17 +1583,16 @@ function App() {
                     <div className="welcome">
                       <div className="welcome-card">
                         <span className="welcome-icon"><FaFilePdf /></span>
-                        <h1>Open a PDF to start editing</h1>
-                        <p>Edit existing text in its own font, add text, images and signatures, highlight, draw and comment.</p>
-                        <button type="button" className="btn btn-primary" onClick={() => fileInputRef.current?.click()}><FaUpload /> Choose PDF</button>
-                        <small>or drop a file here · it never leaves this device</small>
+                        <h1>Open a PDF to get started</h1>
                         <div className="welcome-features">
                           {TOOLS.slice(1, 9).map((item) => { const Icon = item.icon; return <span key={item.id}><Icon />{item.label}</span> })}
                         </div>
+                        <button type="button" className="btn btn-primary" onClick={() => void openFromPicker()}><FaUpload /> Choose PDF</button>
+                        <small>Or drop it here — your file stays on this device.</small>
                       </div>
                     </div>
                   )}
-                  {engineError && <div className="engine-error"><FaTools /><h2>This PDF could not be opened</h2><p>{engineError}</p><button type="button" className="btn btn-secondary" onClick={() => fileInputRef.current?.click()}>Choose another PDF</button></div>}
+                  {engineError && <div className="engine-error"><FaTools /><h2>This PDF could not be opened</h2><p>{engineError}</p><button type="button" className="btn btn-secondary" onClick={() => void openFromPicker()}>Choose another PDF</button></div>}
                   {documentSession && (
                     <PdfPageViewer
                       session={documentSession}
@@ -1395,6 +1613,7 @@ function App() {
                       onDraftChange={setEditorDraft}
                       onPageRendered={handlePageRendered}
                       onZoomChange={setZoom}
+                      onPinchZoom={(factor) => { setZoomMode('manual'); setZoom((value) => Math.max(0.25, Math.min(4, Number((value * factor).toFixed(2))))) }}
                       onTextSelected={() => undefined}
                       onRenderError={handleViewerError}
                       renderOverlay={renderOverlay}
@@ -1405,7 +1624,7 @@ function App() {
                   {documentSession && activeToolInfo && activeToolInfo.id !== 'select' && <div className="tool-hint"><activeToolInfo.icon />{activeToolInfo.hint}</div>}
                   {processing && <div className="processing-mask"><FaSpinner className="spin" /><span>{processingProgress ? `Processing PDF… ${processingProgress}%` : 'Processing PDF…'}</span></div>}
                 </div>
-                <footer className="stage-footer">
+                {documentSession && <footer className="stage-footer">
                   <button type="button" className="icon-btn sm only-mobile" onClick={() => setShowLeft(true)} title="Pages"><FaList /></button>
                   <div className="page-nav">
                     <button type="button" className="icon-btn sm" onClick={() => setPage(currentPage - 1)} disabled={!pageCount || currentPage <= 0} aria-label="Previous page"><FaChevronLeft /></button>
@@ -1422,10 +1641,10 @@ function App() {
                     <span>{Math.round(zoom * 100)}%</span>
                     <button type="button" className="icon-btn sm" onClick={() => changeZoom(0.1)} disabled={!documentSession} title="Zoom in (Ctrl +)"><FaPlus /></button>
                   </div>
-                  <button type="button" className={`icon-btn sm ${zoomMode === 'width' ? 'active' : ''}`} title="Fit width" onClick={() => setZoomMode('width')} disabled={!documentSession}><FaExpand /></button>
+                  <button type="button" className={`icon-btn sm fit-width ${zoomMode === 'width' ? 'active' : ''}`} title="Fit width" onClick={() => setZoomMode('width')} disabled={!documentSession}><FaExpand /></button>
                   <button type="button" className={`icon-btn sm hide-compact ${zoomMode === 'page' ? 'active' : ''}`} title="Fit page" onClick={() => setZoomMode('page')} disabled={!documentSession}><FaCompress /></button>
-                  <button type="button" className="icon-btn sm only-mobile" onClick={() => setShowRight((value) => !value)} title="Properties"><FaSlidersH /></button>
-                </footer>
+                  <button type="button" className="icon-btn sm only-mobile" onClick={() => { setShowRight(true); setSheetExpanded(true) }} title="Options"><FaSlidersH /></button>
+                </footer>}
               </section>
 
               {showRight && (
@@ -1446,9 +1665,12 @@ function App() {
                   onClose={() => setShowRight(false)}
                   onChooseImage={() => chooseImage()}
                   onSignature={() => { signaturePointRef.current = null; setSignatureOpen(true) }}
+                  collapsible={isMobile}
+                  collapsed={!sheetExpanded}
+                  onToggleCollapsed={() => setSheetExpanded((value) => !value)}
                 />
               )}
-              {isCompact && !isMobile && (showLeft || showRight) && <div className="backdrop" style={{ position: 'absolute', zIndex: 75 }} onClick={() => { setShowLeft(false); setShowRight(false) }} />}
+              {isCompact && !isMobile && showLeft && <div className="backdrop" style={{ position: 'absolute', zIndex: 75 }} onClick={() => setShowLeft(false)} />}
             </>
           )}
         </section>
@@ -1457,6 +1679,7 @@ function App() {
       {isMobile && editingWorkspace && documentSession && <nav className="mobile-dock" aria-label="Editing tools">{toolButtons}</nav>}
       {signatureOpen && <SignatureDialog onCancel={() => { setSignatureOpen(false); signaturePointRef.current = null }} onConfirm={(result) => void placeSignature(result)} />}
       <Toast message={toast.message} type={toast.type} onClose={closeToast} />
+      <SweetDialogHost />
     </main>
   )
 }

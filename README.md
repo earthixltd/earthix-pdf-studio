@@ -56,9 +56,15 @@ npm run build
 - `DocumentRecoveryService` lists metadata-only recovery candidates, restores a checkpoint or discards it. Recovery restores content but starts a fresh Undo/Redo history because executable command instances are not persisted.
 - IndexedDB checkpoints are local to the current browser profile; they are not cloud backups.
 
+## Editing tools
+
+The Edit workspace has a toolbar (bottom dock on phones) with Select (V), Edit PDF (E), Add text (T), Image (I), Highlight (H), Draw (P), Shapes (R), Comment (N), Sign (S) and Whiteout (W). Select an item to adjust it in the Properties panel or with its handles; Ctrl+D duplicates, Delete removes, arrow keys nudge, Ctrl+Z / Ctrl+Y undo and redo. **Save** (Ctrl+S) writes the changes into the opened file in Chrome/Edge; **Export** downloads a copy. Saved and exported PDFs keep added items adjustable when reopened in Earthix; use "Download flattened PDF" to merge them into the pages. See `docs/architecture/PAGE-OBJECTS.md`.
+
+To try it on a phone, run `START_ON_PHONE.bat` (or `npm run dev:phone`) and open the shown `http://<computer-ip>:5181` address on a phone connected to the same Wi-Fi.
+
 ## Native text editing
 
-Choose **Edit Text**, click any text on the page and type; Enter saves, Esc cancels. Edits rewrite the original PDF text operators in place — same font, size, colour and position, with no overlay or duplicate. Words after the edit on the same line move to fit, while other table cells and columns stay put. Letters missing from an embedded subset font are drawn with the same font installed on the computer (Chrome/Edge asks once for font access), then the closest match. See `docs/architecture/NATIVE-TEXT-EDITING.md` for the pipeline and current limitations.
+Choose **Edit PDF**, click any text on the page and type; Enter saves, Esc cancels. Edits rewrite the original PDF text operators in place — same font, size, colour and position, with no overlay or duplicate. Words after the edit on the same line move to fit, while other table cells and columns stay put. Letters missing from an embedded subset font are drawn with the same font installed on the computer (Chrome/Edge asks once for font access), then the closest match. See `docs/architecture/NATIVE-TEXT-EDITING.md` for the pipeline and current limitations.
 
 ## Testing
 

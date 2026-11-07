@@ -1,7 +1,7 @@
 {
   "name": "earthix-pdf-studio",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "workspaces": [
     "frontend",
@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace @earthix/frontend",
+    "dev:phone": "npm run dev:phone --workspace @earthix/frontend",
     "build": "npm run build --workspace @earthix/frontend",
     "preview": "npm run preview --workspace @earthix/frontend",
     "lint": "npm run lint --workspace @earthix/frontend",

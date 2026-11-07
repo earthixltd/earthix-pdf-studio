@@ -1,5 +1,5 @@
 .earthix-pdf-viewer { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg-stage, #e9edf3); }
-.earthix-pdf-scroll-area { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: auto; padding: 24px; scrollbar-width: thin; }
+.earthix-pdf-scroll-area { touch-action: pan-x pan-y; display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: auto; padding: 24px; scrollbar-width: thin; }
 .earthix-pdf-page { position: relative; width: max-content; min-width: 1px; min-height: 1px; margin: 0 auto 24px; overflow: hidden; background: #fff; border-radius: 2px; box-shadow: var(--page-shadow, 0 2px 9px rgb(35 39 58 / 9%)); }
 .earthix-pdf-surface { position: relative; }
 .earthix-pdf-canvas { display: block; max-width: none; background: #fff; }

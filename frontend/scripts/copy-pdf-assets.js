@@ -48,4 +48,11 @@ await Promise.all([
   copyPackageAsset('pdfjs-dist', 'image_decoders', 'image_decoders', { required: true }),
   copyPackageAsset('pdfjs-dist', 'iccs', 'pdfjs/iccs', { required: true }),
   copyPackageAsset('@embedpdf/pdfium', 'dist/pdfium.wasm', 'pdfium/pdfium.wasm', { required: true }),
+  // Local OCR (reading text inside images): worker, LSTM cores and language data, so nothing is fetched from a CDN.
+  copyPackageAsset('tesseract.js', 'dist/worker.min.js', 'tesseract/worker.min.js'),
+  copyPackageAsset('tesseract.js-core', 'tesseract-core-lstm.wasm.js', 'tesseract/core/tesseract-core-lstm.wasm.js'),
+  copyPackageAsset('tesseract.js-core', 'tesseract-core-simd-lstm.wasm.js', 'tesseract/core/tesseract-core-simd-lstm.wasm.js'),
+  copyPackageAsset('tesseract.js-core', 'tesseract-core-relaxedsimd-lstm.wasm.js', 'tesseract/core/tesseract-core-relaxedsimd-lstm.wasm.js'),
+  copyPackageAsset('@tesseract.js-data/eng', '4.0.0_best_int/eng.traineddata.gz', 'tesseract/lang/eng.traineddata.gz'),
+  copyPackageAsset('@tesseract.js-data/hin', '4.0.0_best_int/hin.traineddata.gz', 'tesseract/lang/hin.traineddata.gz'),
 ])

@@ -20,21 +20,62 @@ import { createStandardFontEncoder } from '../engine/font-engine/fontEmbedder.js
 import { normalizeFontKey } from '../engine/font-engine/pdfFontLoader.js'
 import { invertMatrix, multiplyMatrix, pageGeometry, rotateMatrix, scaleMatrix, transformPoint, translateMatrix } from '../engine/page-objects/pageGeometry.js'
 import { isStandardFamily, standardFontFor } from '../engine/page-objects/textLayout.js'
+import { INDIC_SCRIPT, toLogicalIndic } from '../engine/font-engine/indicText.js'
+import { recoverUnmappedGlyphs } from '../engine/font-engine/glyphRecovery.js'
 import { buildImageXObject, detectImageFormat } from '../engine/page-objects/imageCodec.js'
 
 const dot = (point, vector) => point.x * vector.x + point.y * vector.y
 const stripSpaces = (value) => String(value || '').replace(/\s+/g, '')
 // Scripts whose PDF glyph order differs from Unicode order (Indic, Arabic, Hebrew, Thai, ...).
 const COMPLEX_SCRIPT = /[\u0590-\u08ff\u0900-\u0dff\u0e00-\u0fff\u1000-\u109f\u1780-\u17ff]/
+const INDIC_GLOBAL = new RegExp(INDIC_SCRIPT.source, 'g')
+// Right-to-left and other scripts that still cannot be edited safely.
+const isLockedScript = (text) => COMPLEX_SCRIPT.test(String(text || '').replace(INDIC_GLOBAL, ''))
+
 
 // ---------------------------------------------------------------------------
 // Analysis
 // ---------------------------------------------------------------------------
 
-async function analyzeDocument(bytes) {
+/**
+ * Analyse a PDF. With options.fontProvider, Indic glyphs that the PDF did not
+ * label with Unicode are identified from the same installed font.
+ */
+async function analyzeDocument(bytes, options = {}) {
+  const analysis = await analyzeOnce(bytes, options.recoveredGlyphs || null)
+  if (!options.fontProvider || options.recoveredGlyphs) return analysis
+  const recovered = await recoverIndicGlyphs(analysis, options.fontProvider)
+  return recovered.size ? analyzeOnce(bytes, recovered) : analysis
+}
+
+async function recoverIndicGlyphs(analysis, fontProvider) {
+  // Per font: Indic letters it does label (samples) and glyphs it does not.
+  const perFont = new Map()
+  for (const run of analysis.runs) {
+    const font = run.fontKey ? analysis.context.fontCache.get(run.fontKey) : null
+    if (!font || font.codeBytes !== 2) continue
+    if (!perFont.has(run.fontKey)) perFont.set(run.fontKey, { font, unmapped: new Set(), samples: new Map() })
+    const entry = perFont.get(run.fontKey)
+    for (const glyph of run.glyphs) {
+      if (glyph.code === undefined) continue
+      const value = font.decode(glyph.code)
+      if (value === null) entry.unmapped.add(glyph.code)
+      else if ([...value].length === 1 && INDIC_SCRIPT.test(value)) entry.samples.set(glyph.code, value)
+    }
+  }
+  for (const [fontKey, entry] of perFont) if (!entry.unmapped.size || entry.samples.size < 3) perFont.delete(fontKey)
+  const recovered = new Map()
+  for (const [fontKey, entry] of perFont) {
+    const map = await recoverUnmappedGlyphs(entry.font, entry.unmapped, entry.samples, fontProvider).catch(() => null)
+    if (map?.size) recovered.set(fontKey, map)
+  }
+  return recovered
+}
+
+async function analyzeOnce(bytes, recoveredGlyphs) {
   const index = await PdfDocumentIndex.open(bytes)
   const pages = index.getPages()
-  const context = { fontCache: new Map(), streams: new Map(), runs: [], warnings: [], activeForms: new Set() }
+  const context = { fontCache: new Map(), streams: new Map(), runs: [], warnings: [], activeForms: new Set(), recoveredGlyphs }
   for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
     try {
       await interpretPageText(index, pages[pageIndex], pageIndex, context)
@@ -108,7 +149,7 @@ function describeImages(index, pages, images) {
     let reason = ''
     if (image.depth > 0 || image.owner?.kind !== 'page') {
       editable = false
-      reason = 'This image is part of a reusable graphic in the PDF, so it cannot be moved or replaced on its own.'
+      reason = 'This image is part of a shared graphic, so it can’t be changed on its own.'
     }
     return {
       key: count ? `${image.key}#${count}` : image.key,
@@ -145,15 +186,24 @@ function decorateBlock(block, context) {
   block.descentUser = ((font?.descent ?? -200) / 1000) * block.fontSizeUser
   block.editable = true
   block.reason = ''
-  if (!block.decodable) {
+  if (block.decodable && INDIC_SCRIPT.test(block.text)) {
+    // Hindi and other Indic text: show it in the order people type it.
+    block.text = toLogicalIndic(block.text)
+    block.complexScript = true
+  }
+  if (!block.decodable && INDIC_SCRIPT.test(block.text)) {
     block.editable = false
-    block.reason = 'Some characters of this text have no Unicode mapping in the PDF, so it cannot be edited without changing its meaning.'
-  } else if (COMPLEX_SCRIPT.test(block.text)) {
+    block.reasonCode = 'needs-installed-font'
+    block.reason = 'Allow font access to edit this Hindi text.'
+  } else if (!block.decodable) {
     block.editable = false
-    block.reason = 'Hindi and other complex-script text is stored as shaped glyphs in PDFs; editing it is not supported yet.'
+    block.reason = 'This text is stored as shapes, so it can’t be edited.'
+  } else if (isLockedScript(block.text)) {
+    block.editable = false
+    block.reason = 'Arabic, Hebrew and Thai text can’t be edited yet.'
   } else if (!run?.fontResource) {
     block.editable = false
-    block.reason = 'This text selects its font through a graphics-state resource, which cannot be edited safely yet.'
+    block.reason = 'This text can’t be edited safely.'
   } else if (font?.unsupportedReason) {
     block.editable = false
     block.reason = font.unsupportedReason
@@ -174,8 +224,8 @@ function toPublicInspection(analysis, bytes) {
   }
 }
 
-export async function inspectNativePdfText(bytes) {
-  const analysis = await analyzeDocument(bytes)
+export async function inspectNativePdfText(bytes, options = {}) {
+  const analysis = await analyzeDocument(bytes, options)
   return toPublicInspection(analysis, bytes)
 }
 
@@ -201,6 +251,27 @@ function elementsToTJ(elements, codeBytes) {
   }
   if (hex) parts.push(`<${hex}>`)
   return parts.join(' ')
+}
+
+/**
+ * TJ operator(s) for elements; glyphs with a vertical mark offset (`rise`)
+ * are drawn with a temporary text rise and the original rise is restored.
+ */
+function showOperators(elements, codeBytes, baseRise = 0) {
+  if (!elements.some((element) => element.rise)) return `[${elementsToTJ(elements, codeBytes)}] TJ`
+  const chunks = []
+  let current = { rise: 0, items: [] }
+  for (const element of elements) {
+    const rise = element.code !== undefined ? (element.rise || 0) : current.rise
+    if (element.code !== undefined && Math.abs(rise - current.rise) > 0.0005) {
+      if (current.items.length) chunks.push(current)
+      current = { rise, items: [] }
+    }
+    current.items.push(element)
+  }
+  if (current.items.length) chunks.push(current)
+  const base = Number(baseRise) || 0
+  return `${chunks.map((chunk) => `${formatPdfNumber(Number((base + chunk.rise).toFixed(3)))} Ts [${elementsToTJ(chunk.items, codeBytes)}] TJ`).join(' ')} ${formatPdfNumber(base)} Ts`
 }
 
 function showPrefix(run) {
@@ -309,7 +380,9 @@ function planBlockRewrite({ block, blockRuns, font, newText, fallback, fallbackR
   const spaceAdjust = averageVirtualSpace(blockRuns)
   if (fallback) {
     for (const glyph of fallback.encoder.encode(middle)) {
-      elements.push({ code: glyph.code, font: 'fallback' })
+      if (glyph.xOffset) elements.push({ adjust: -glyph.xOffset })
+      elements.push({ code: glyph.code, font: 'fallback', rise: glyph.yOffset ? (glyph.yOffset / 1000) * target.fontSize : 0 })
+      if (glyph.xOffset) elements.push({ adjust: glyph.xOffset })
       const isOneByteSpace = fallback.encoder.codeBytes === 1 && glyph.code === 32
       advance += ((glyph.width / 1000) * target.fontSize + target.characterSpacing + (isOneByteSpace ? target.wordSpacing : 0)) * horizontal
       let extra = glyph.kern ? -glyph.kern : 0
@@ -356,8 +429,8 @@ function planBlockRewrite({ block, blockRuns, font, newText, fallback, fallbackR
 
   let operatorText
   if (fallback) {
-    const glyphElements = finalElements.map((element) => (element.code !== undefined ? { code: element.code } : element))
-    operatorText = `${showPrefix(target)}/${fallbackResourceName} ${formatPdfNumber(target.fontSize)} Tf [${elementsToTJ(glyphElements, fallback.encoder.codeBytes)}] TJ /${target.fontResource} ${formatPdfNumber(target.fontSize)} Tf`
+    const glyphElements = finalElements.map((element) => (element.code !== undefined ? { code: element.code, rise: element.rise } : element))
+    operatorText = `${showPrefix(target)}/${fallbackResourceName} ${formatPdfNumber(target.fontSize)} Tf ${showOperators(glyphElements, fallback.encoder.codeBytes, target.textRise)} /${target.fontResource} ${formatPdfNumber(target.fontSize)} Tf`
   } else {
     operatorText = `${showPrefix(target)}[${elementsToTJ(finalElements, font.codeBytes)}] TJ`
   }
@@ -417,7 +490,7 @@ function buildShiftEdits({ analysis, block, blockRunKeys, excludedKeys, oldEnd, 
     if (Math.min(c1, c2) <= baseline + 0.6 * size && Math.max(c1, c2) >= baseline - 0.1 * size) boundary = a1
   }
   if (delta > 0 && lastEnd + delta > boundary - 0.05 * size) {
-    warnings.push('The edited text is now wider than the space available and may cross a table border or the next column.')
+    warnings.push('It may now overlap the next column.')
   } else if (delta > 0 && !Number.isFinite(boundary)) {
     // Right margin of the surrounding text: the furthest line end on this page.
     let margin = -Infinity
@@ -426,7 +499,7 @@ function buildShiftEdits({ analysis, block, blockRunKeys, excludedKeys, oldEnd, 
       margin = Math.max(margin, dot(run.endPoint, direction))
     }
     if (Number.isFinite(margin) && lastEnd <= margin + 0.5 && lastEnd + delta > margin + 0.5) {
-      warnings.push('This line is now longer than the paragraph and extends past its right margin. Shorten the text or edit the next line too.')
+      warnings.push('The line now runs past the margin.')
     }
   }
 
@@ -656,16 +729,16 @@ function fontRequestFor(font) {
  * the PDF's embedded subset font.
  */
 export async function replaceNativeTextBlock(bytes, blockReference, replacementText, options = {}) {
-  const analysis = await analyzeDocument(bytes)
+  const analysis = await analyzeDocument(bytes, options)
   const block = locateBlock(analysis, blockReference)
-  if (!block) throw new Error('The selected text changed. Click it again before editing.')
+  if (!block) throw new Error('This text changed. Click it again.')
   if (blockReference.text !== undefined && stripSpaces(blockReference.text) !== stripSpaces(block.text)) {
-    throw new Error('The selected text changed. Click it again before editing.')
+    throw new Error('This text changed. Click it again.')
   }
   if (!block.editable) throw new Error(block.reason || 'This text cannot be edited.')
   const newText = String(replacementText ?? '').replace(/[\r\n\t]+/g, ' ')
-  if (newText === block.text) throw new Error('The replacement text is identical to the original text. Make a change before replacing it.')
-  if (COMPLEX_SCRIPT.test(newText)) throw new Error('Typing Hindi or other complex-script text into a PDF is not supported yet.')
+  if (newText === block.text) throw new Error('Nothing changed.')
+  if (isLockedScript(newText)) throw new Error('Arabic, Hebrew and Thai can’t be typed here yet.')
   return applyBlockEdit(bytes, analysis, block, newText, options)
 }
 
@@ -679,10 +752,16 @@ async function applyBlockEdit(bytes, analysis, block, newText, options) {
   const { middle } = computeDiff(block.chars, newText)
   const missing = [...new Set([...middle].filter((character) => !/\s/.test(character) && font.encodeCharacter(character) === null))]
   let fallback = null
-  if (missing.length) {
+  // Indic text needs shaping (conjuncts, matras), so the whole block is redrawn
+  // with an installed font that has the script's shaping rules.
+  const needsShaping = Boolean(block.complexScript) || INDIC_SCRIPT.test(newText)
+  if (missing.length || needsShaping) {
     fallback = await resolveFallbackFont(fontRequestFor(font), newText, options.fontProvider)
+    if (fallback && needsShaping && fallback.encoder.kind !== 'embedded') fallback = null
     if (!fallback) {
-      throw new Error(`The PDF font cannot draw ${missing.join(' ')} and no matching font is installed on this computer. Install the font (or allow font access) and try again.`)
+      throw new Error(needsShaping
+        ? 'Editing Hindi needs a Hindi font like Nirmala UI. Allow font access and try again.'
+        : `No font here can draw ${missing.join(' ')}. Allow font access and try again.`)
     }
   }
 
@@ -735,11 +814,11 @@ async function applyBlockEdit(bytes, analysis, block, newText, options) {
   const nextBytes = await commitStreamEdits(analysis, [...plans.flatMap((item) => item.plan.edits), ...shift.edits].map(runEdit), resources, extraObjects)
 
   // Verify: the edited line now reads the new text from the same origin.
-  const verification = await analyzeDocument(nextBytes)
+  const verification = await analyzeDocument(nextBytes, options)
   if (newText.trim()) {
     const lineText = lineTextFrom(verification, block.pageIndex, block.startPoint, block)
     if (!stripSpaces(lineText).startsWith(stripSpaces(newText))) {
-      throw new Error('The edit could not be verified in the rewritten PDF, so it was not applied.')
+      throw new Error('Couldn’t apply this edit safely, so nothing changed.')
     }
   }
   const updatedBlock = findBlockNear(verification, block.pageIndex, block.startPoint, block)
@@ -789,7 +868,9 @@ function planRestyle({ block, blockRuns, font, encoder, resourceName, newFontSiz
   let advance = 0
   if (encoder) {
     for (const glyph of encoder.encode(block.text)) {
-      elements.push({ code: glyph.code })
+      if (glyph.xOffset) elements.push({ adjust: -glyph.xOffset })
+      elements.push({ code: glyph.code, rise: glyph.yOffset ? (glyph.yOffset / 1000) * size : 0 })
+      if (glyph.xOffset) elements.push({ adjust: glyph.xOffset })
       const isOneByteSpace = encoder.codeBytes === 1 && glyph.code === 32
       advance += ((glyph.width / 1000) * size + target.characterSpacing + (isOneByteSpace ? target.wordSpacing : 0)) * horizontal
       let extra = glyph.kern ? -glyph.kern : 0
@@ -827,7 +908,7 @@ function planRestyle({ block, blockRuns, font, encoder, resourceName, newFontSiz
   if (fillOps && strokes) parts.push(fillOps.stroke)
   parts.push(showPrefix(target).trim())
   parts.push(`/${encoder ? resourceName : target.fontResource} ${formatPdfNumber(size)} Tf`)
-  parts.push(`[${elementsToTJ([...elements, { adjust: keepAdvance }], codeBytes)}] TJ`)
+  parts.push(showOperators([...elements, { adjust: keepAdvance }], codeBytes, target.textRise))
   parts.push(`/${target.fontResource} ${formatPdfNumber(oldSize)} Tf`)
   if (restoreFill) parts.push(restoreFill)
   if (fillOps && strokes) parts.push(target.strokeColorOps)
@@ -848,11 +929,11 @@ function planRestyle({ block, blockRuns, font, encoder, resourceName, newFontSiz
  * Text after it on the same line moves to fit, like a normal edit.
  */
 export async function restyleNativeTextBlock(bytes, blockReference, style = {}, options = {}) {
-  const analysis = await analyzeDocument(bytes)
+  const analysis = await analyzeDocument(bytes, options)
   const block = locateBlock(analysis, blockReference)
-  if (!block) throw new Error('The selected text changed. Click it again before changing its style.')
+  if (!block) throw new Error('This text changed. Click it again.')
   if (blockReference.text !== undefined && stripSpaces(blockReference.text) !== stripSpaces(block.text)) {
-    throw new Error('The selected text changed. Click it again before changing its style.')
+    throw new Error('This text changed. Click it again.')
   }
   if (!block.editable) throw new Error(block.reason || 'This text cannot be changed.')
   const { index, context } = analysis
@@ -875,14 +956,14 @@ export async function restyleNativeTextBlock(bytes, blockReference, style = {}, 
     }
     fallback = await resolveStyleFont(request, block.text, options.fontProvider)
     if (!fallback) throw new Error(`No installed font can draw this text in ${request.family}${request.bold ? ' bold' : ''}${request.italic ? ' italic' : ''}. Allow font access in Chrome or Edge, or pick another font.`)
-    if (fallback.match !== 'exact') warnings.push(`${request.family}${request.bold ? ' Bold' : ''}${request.italic ? ' Italic' : ''} is not available on this computer, so ${fallback.label} was used.`)
+    if (fallback.match !== 'exact') warnings.push(`Used ${fallback.label} — ${request.family}${request.bold ? ' Bold' : ''}${request.italic ? ' Italic' : ''} is not available here.`)
   }
   const scaleRatio = Math.abs(block.fontSize) ? block.fontSizeUser / Math.abs(block.fontSize) : 1
   const newFontSize = Number.isFinite(style.fontSize) && style.fontSize > 0 && Math.abs(style.fontSize - block.fontSizeUser) > 0.01
     ? (Math.sign(block.fontSize) || 1) * (style.fontSize / scaleRatio)
     : null
   const fillOps = style.color && style.color.toUpperCase() !== String(block.fillColor || '').toUpperCase() ? fillColorOperators(style.color) : null
-  if (!fallback && newFontSize === null && !fillOps) throw new Error('Choose a different font, size or colour first.')
+  if (!fallback && newFontSize === null && !fillOps) throw new Error('Pick a different font, size or colour.')
 
   let nextObjectNumber = index.size
   const allocate = () => nextObjectNumber++
@@ -915,10 +996,10 @@ export async function restyleNativeTextBlock(bytes, blockReference, style = {}, 
   const extraObjects = fallback ? (await fallback.encoder.buildObjects(allocate, fontRef.num)).objects : []
   const nextBytes = await commitStreamEdits(analysis, [...plans.flatMap((plan) => plan.edits), ...shift.edits].map(runEdit), resources, extraObjects)
 
-  const verification = await analyzeDocument(nextBytes)
+  const verification = await analyzeDocument(nextBytes, options)
   const updatedBlock = findBlockNear(verification, block.pageIndex, block.startPoint, block)
   if (!updatedBlock || stripSpaces(updatedBlock.text) !== stripSpaces(block.text)) {
-    throw new Error('The style change could not be verified in the rewritten PDF, so it was not applied.')
+    throw new Error('Couldn’t apply this style safely, so nothing changed.')
   }
   return {
     bytes: nextBytes,
@@ -952,10 +1033,10 @@ const matrixOperands = (m) => m.map((value) => formatPdfNumber(Math.round(value 
  * operation: { type: 'transform', from, to, rotation } (view-space boxes at 100 %),
  *            { type: 'delete' }, { type: 'replace', data }, { type: 'opacity', value }
  */
-export async function editPageImage(bytes, imageReference, operation) {
-  const analysis = await analyzeDocument(bytes)
+export async function editPageImage(bytes, imageReference, operation, options = {}) {
+  const analysis = await analyzeDocument(bytes, options)
   const image = analysis.images.find((item) => item.key === imageReference?.key)
-  if (!image) throw new Error('The selected image changed. Click it again.')
+  if (!image) throw new Error('This image changed. Click it again.')
   if (!image.editable) throw new Error(image.reason)
   const { index, context } = analysis
   const stream = context.streams.get(image.streamObjectNumber)
@@ -975,7 +1056,7 @@ export async function editPageImage(bytes, imageReference, operation) {
   } else if (operation?.type === 'delete') {
     text = ' '
   } else if (operation?.type === 'replace') {
-    if (image.kind !== 'xobject') throw new Error('This image is stored inline in the page and cannot be replaced. Delete it and add a new image instead.')
+    if (image.kind !== 'xobject') throw new Error('This image can’t be replaced — delete it and add a new one.')
     if (!detectImageFormat(operation.data)) throw new Error('Choose a JPEG or PNG image.')
     const built = await buildImageXObject(operation.data, allocate)
     extraObjects.push(...built.objects)
@@ -1000,10 +1081,10 @@ export async function editPageImage(bytes, imageReference, operation) {
     throw new Error('Unknown image operation.')
   }
   const nextBytes = await commitStreamEdits(analysis, [{ streamObjectNumber: image.streamObjectNumber, start: image.start, end: image.end, text }], resources, extraObjects)
-  const verification = await analyzeDocument(nextBytes)
+  const verification = await analyzeDocument(nextBytes, options)
   const expected = analysis.images.filter((item) => item.pageIndex === image.pageIndex).length - (operation.type === 'delete' ? 1 : 0)
   if (verification.images.filter((item) => item.pageIndex === image.pageIndex).length !== expected) {
-    throw new Error('The image change could not be verified in the rewritten PDF, so it was not applied.')
+    throw new Error('Couldn’t change this image safely, so nothing changed.')
   }
   const updatedImage = operation.type === 'delete'
     ? null
@@ -1017,10 +1098,10 @@ export async function editPageImage(bytes, imageReference, operation) {
  */
 export async function replaceNativePdfText(bytes, run, replacementText, options = {}) {
   if (!run || !Number.isInteger(run.streamObjectNumber)) throw new Error('Select an existing PDF text line before replacing it.')
-  const analysis = await analyzeDocument(bytes)
+  const analysis = await analyzeDocument(bytes, options)
   const target = analysis.runs.find((item) => item.key === run.key)
   if (!target) throw new Error('The selected text run changed. Select it again before replacing.')
-  if (replacementText === target.originalText) throw new Error('The replacement text is identical to the original text. Make a change before replacing it.')
+  if (replacementText === target.originalText) throw new Error('Nothing changed.')
   if (!String(replacementText || '').length) throw new Error('Replacement text cannot be empty.')
   const owner = analysis.blocks.find((block) => block.runKeys.includes(target.key))
   let block = owner

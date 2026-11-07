@@ -145,11 +145,11 @@ export class TextFontManager {
     const fallback = await resolveFallbackFont({ family, bold, italic, serif: family === 'Times', fixedPitch: family === 'Courier' }, visible || 'a', this.provider)
     if (fallback) {
       if (object.fontSource === 'local' && fallback.match !== 'exact') {
-        this.warnings.push(`“${family}” is not available on this computer, so ${fallback.label} was used for some text.`)
+        this.warnings.push(`Used ${fallback.label} — “${family}” is not available here.`)
       }
       return this.register(`fallback:${fallback.label}:${fallback.encoder.kind}`, fallback.encoder)
     }
-    this.warnings.push('Some characters could not be drawn with any available font and were replaced with “?”.')
+    this.warnings.push('Some letters couldn’t be drawn and show as “?”.')
     const standard = this.standard(standardFontFor(family, bold, italic))
     return { ...standard, lossy: true, entry: standard }
   }
@@ -383,8 +383,8 @@ export async function writePageObjects(bytes, objects, { fontProvider = null, fl
         } else if (object.type === 'highlight') {
           ops.push(`${head} ${matrixText(geometry.toUser)} cm\n${highlightRectOps(object)}\nQ`)
         }
-      } catch (error) {
-        warnings.push(`An added ${object.type} on page ${pageIndex + 1} could not be written: ${error.message}`)
+      } catch {
+        warnings.push(`One item on page ${pageIndex + 1} couldn’t be saved.`)
       }
     }
 

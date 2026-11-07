@@ -52,6 +52,7 @@ class CompositeCommand {
         throw new AggregateError(
           [error, ...rollbackErrors],
           "Redo failed and the composite command could not be fully rolled back.",
+            { cause: error },
         );
       }
       throw error;
@@ -78,6 +79,7 @@ class CompositeCommand {
         throw new AggregateError(
           [error, ...restoreErrors],
           "Undo failed and the composite command could not be restored.",
+            { cause: error },
         );
       }
       throw error;
@@ -200,6 +202,7 @@ export class CommandManager {
           throw new AggregateError(
             [error, rollbackError],
             "Document command failed and its partial changes could not be rolled back.",
+            { cause: rollbackError },
           );
         }
         throw error;
@@ -230,6 +233,7 @@ export class CommandManager {
           throw new AggregateError(
             [error, restoreError],
             "Undo failed and the document could not be restored to its prior state.",
+            { cause: restoreError },
           );
         }
         throw error;
@@ -262,6 +266,7 @@ export class CommandManager {
           throw new AggregateError(
             [error, rollbackError],
             "Redo failed and its partial changes could not be rolled back.",
+            { cause: rollbackError },
           );
         }
         throw error;
@@ -315,6 +320,7 @@ export class CommandManager {
         throw new AggregateError(
           [error, ...rollbackErrors],
           "Document transaction failed and one or more rollback operations also failed.",
+            { cause: error },
         );
       }
       throw error;

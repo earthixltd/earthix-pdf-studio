@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  FaAlignCenter, FaAlignLeft, FaAlignRight, FaArrowDown, FaArrowUp, FaBold, FaClone, FaDesktop, FaEraser, FaExchangeAlt,
+  FaAlignCenter, FaAlignLeft, FaAlignRight, FaArrowDown, FaChevronDown, FaChevronUp, FaArrowUp, FaBold, FaClone, FaDesktop, FaEraser, FaExchangeAlt,
   FaFilePdf, FaFont, FaHighlighter, FaICursor, FaImage, FaInfoCircle, FaItalic, FaKeyboard, FaLock, FaLongArrowAltRight,
   FaPenNib, FaRedoAlt, FaRegCircle, FaRegSquare, FaShapes, FaShieldAlt, FaSignature, FaSlash, FaStickyNote,
   FaStrikethrough, FaTimes, FaTrashAlt, FaUnderline, FaUndoAlt,
@@ -16,24 +16,47 @@ const round = (value, digits = 1) => (Number.isFinite(value) ? Math.round(value 
 // Small controls
 // ---------------------------------------------------------------------------
 
+const HEX = /^#[0-9a-f]{6}$/i
+
 function ColorPicker({ value, onChange, colors = COLOR_SWATCHES, allowNone = false, label }) {
   const pickerRef = useRef(null)
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
+  // The picker keeps its own value while open; it is committed when the
+  // browser's colour dialog closes (change) or the input loses focus.
+  const [custom, setCustom] = useState(HEX.test(value || '') ? value : '#000000')
+  const committedRef = useRef(value)
+  useEffect(() => {
+    committedRef.current = value
+    if (HEX.test(value || '')) setCustom(value)
+  }, [value])
   useEffect(() => {
     const input = pickerRef.current
     if (!input) return undefined
-    const commit = () => onChange(input.value.toUpperCase())
+    const commit = () => {
+      const next = input.value.toUpperCase()
+      if (next !== String(committedRef.current || '').toUpperCase()) {
+        committedRef.current = next
+        onChangeRef.current(next)
+      }
+    }
     input.addEventListener('change', commit)
-    return () => input.removeEventListener('change', commit)
-  }, [onChange])
+    input.addEventListener('blur', commit)
+    return () => {
+      input.removeEventListener('change', commit)
+      input.removeEventListener('blur', commit)
+    }
+  }, [])
   const current = (value || '').toUpperCase()
+  const isCustom = Boolean(value) && !colors.some((color) => color.toUpperCase() === current)
   return (
     <div className="swatches" role="group" aria-label={label}>
       {allowNone && <button type="button" className={`swatch none ${!value ? 'active' : ''}`} title="None" aria-label="No colour" onClick={() => onChange(null)} />}
       {colors.map((color) => (
         <button key={color} type="button" className={`swatch ${current === color.toUpperCase() ? 'active' : ''}`} style={{ background: color }} title={color} aria-label={color} onClick={() => onChange(color)} />
       ))}
-      <label className="swatch-picker" title="Custom colour">
-        <input ref={pickerRef} type="color" value={/^#[0-9a-f]{6}$/i.test(value || '') ? value : '#000000'} onChange={() => undefined} aria-label="Custom colour" />
+      <label className={`swatch-picker ${isCustom ? 'active' : ''}`} title="Pick any colour" style={isCustom ? { background: value } : undefined}>
+        <input ref={pickerRef} type="color" value={custom} onChange={(event) => setCustom(event.target.value)} aria-label="Pick any colour" />
       </label>
     </div>
   )
@@ -239,7 +262,7 @@ function ObjectProperties({ object, actions, localFonts }) {
             <button type="button" className="icon-btn sm" title="Delete (Del)" onClick={() => actions.remove(object)}><FaTrashAlt /></button>
           </div>
         </div>
-        {object.type === 'text' && <p className="notice" style={{ marginTop: 12 }}><FaInfoCircle />Double-click the box to type. Drag the side handles to set the width, the corners to change the size.</p>}
+        {object.type === 'text' && <p className="notice" style={{ marginTop: 12 }}><FaInfoCircle />Double-tap to type. Drag the corners to resize.</p>}
       </div>
 
       {object.type === 'text' && <TextProperties object={object} update={update} preview={preview} localFonts={localFonts} />}
@@ -251,6 +274,7 @@ function ObjectProperties({ object, actions, localFonts }) {
             <p className="prop-title">Image</p>
             <div className="button-row">
               <button type="button" className="btn btn-secondary btn-sm" onClick={() => actions.replaceImage(object)}><FaExchangeAlt /> Replace</button>
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => actions.readImageText(object)}><FaICursor /> Edit text</button>
               <button type="button" className="btn btn-secondary btn-sm" onClick={() => update({ height: object.width * ((object.pixelHeight || 1) / (object.pixelWidth || 1)) }, 'Reset proportions')}>Reset ratio</button>
             </div>
           </div>
@@ -262,7 +286,7 @@ function ObjectProperties({ object, actions, localFonts }) {
           <div className="prop-section">
             <p className="prop-title">{object.whiteout ? 'Whiteout' : 'Shape'}</p>
             {object.whiteout ? (
-              <p className="notice"><FaEraser />Covers what is underneath with a white box. The covered text is hidden, not removed — use Edit PDF to change or delete text.</p>
+              <p className="notice"><FaEraser />Hides what’s underneath. The text is still in the file.</p>
             ) : (
               <>
                 <div className="field"><label>Outline colour</label><ColorPicker value={object.strokeColor} allowNone={!isLineShape(object)} onChange={(strokeColor) => update({ strokeColor, strokeWidth: strokeColor && !object.strokeWidth ? 2 : object.strokeWidth }, 'Outline colour')} /></div>
@@ -314,7 +338,7 @@ function ObjectProperties({ object, actions, localFonts }) {
           <p className="prop-title">Comment</p>
           <div className="field"><CommitTextarea autoFocus={!object.text} value={object.text || ''} placeholder="Write your comment…" onCommit={(text) => update({ text }, 'Edit comment')} /></div>
           <div className="field"><label>Colour</label><ColorPicker value={object.color} colors={NOTE_COLORS} onChange={(color) => update({ color }, 'Comment colour')} /></div>
-          <p className="notice"><FaInfoCircle />Saved as a standard PDF comment that other PDF apps show too.</p>
+          <p className="notice"><FaInfoCircle />Other PDF apps will show this comment too.</p>
         </div>
       )}
 
@@ -350,7 +374,7 @@ function BlockProperties({ block, busy, onStyle, localFonts, fonts, editorDraft,
           <span className="prop-hero-icon"><FaICursor /></span>
           <div><strong>PDF text</strong><small>Page {block.pageNumber} · {editing ? 'typing…' : 'selected'}</small></div>
         </div>
-        <p className="notice" style={{ marginTop: 12 }}><FaInfoCircle />Type on the page — Enter saves, Esc cancels. Style changes below rewrite this text inside the PDF.</p>
+        <p className="notice" style={{ marginTop: 12 }}><FaInfoCircle />Type on the page. Enter saves, Esc cancels.</p>
       </div>
       <div className="prop-section">
         <p className="prop-title">Style {busy && <small>Saving…</small>}</p>
@@ -369,7 +393,7 @@ function BlockProperties({ block, busy, onStyle, localFonts, fonts, editorDraft,
           </div>
         </div>
         <div className="field"><label>Colour</label><ColorPicker value={block.fillColor} onChange={(color) => { if (!busy && color) onStyle(block, { color }) }} /></div>
-        {block.twinKeys?.length > 0 && <p className="notice"><FaInfoCircle />This text is drawn twice (shadow or bold effect); both copies change together.</p>}
+        {block.twinKeys?.length > 0 && <p className="notice"><FaInfoCircle />This text has a shadow copy — both change together.</p>}
       </div>
       <div className="prop-section">
         <details className="font-details">
@@ -413,6 +437,7 @@ function PageImageProperties({ image, busy, onImage }) {
             <p className="prop-title">Image</p>
             <RangeField label="Opacity" value={100} min={10} max={100} step={5} format={(value) => `${value}%`} disabled={busy}
               onCommit={(value) => { if (value < 100) onImage(image, { type: 'opacity', value: value / 100 }) }} />
+            <button type="button" className="btn btn-primary btn-block" disabled={busy} onClick={() => onImage(image, { type: 'read-text' })} style={{ marginBottom: 8 }}><FaICursor /> Edit text in this image</button>
             <button type="button" className="btn btn-secondary btn-block" disabled={busy || image.kind !== 'xobject'} onClick={() => onImage(image, { type: 'replace' })}><FaExchangeAlt /> Replace image…</button>
           </div>
         </>
@@ -483,7 +508,7 @@ function ToolSettings({ tool, settings, onSettings, localFonts, onChooseImage, o
         {shape.shape !== 'line' && shape.shape !== 'arrow' && <div className="field"><label>Fill</label><ColorPicker value={shape.fillColor} allowNone onChange={(fillColor) => set({ fillColor })} /></div>}
         <RangeField label="Line width" value={shape.strokeWidth} min={0.5} max={20} step={0.5} format={(value) => `${value} pt`} onCommit={(strokeWidth) => set({ strokeWidth })} />
         <label className="check-row"><input type="checkbox" checked={shape.dashed} onChange={(event) => set({ dashed: event.target.checked })} /> Dashed line</label>
-        <p className="notice" style={{ marginTop: 12 }}><FaKeyboard />Hold Shift for squares, circles and straight angles.</p>
+        <p className="notice" style={{ marginTop: 12 }}><FaKeyboard />Hold Shift for perfect squares and straight lines.</p>
       </div>
     )
   }
@@ -496,13 +521,13 @@ function ToolSettings({ tool, settings, onSettings, localFonts, onChooseImage, o
     )
   }
   if (tool === 'image') {
-    return <div className="prop-section"><p className="prop-title">Image</p><button type="button" className="btn btn-primary btn-block" onClick={onChooseImage}><FaImage /> Choose a picture…</button><p className="notice" style={{ marginTop: 12 }}><FaInfoCircle />JPG, PNG, WebP, GIF and SVG pictures are supported.</p></div>
+    return <div className="prop-section"><p className="prop-title">Image</p><button type="button" className="btn btn-primary btn-block" onClick={onChooseImage}><FaImage /> Choose a picture…</button><p className="notice" style={{ marginTop: 12 }}><FaInfoCircle />Works with JPG, PNG, WebP, GIF and SVG.</p></div>
   }
   if (tool === 'signature') {
     return <div className="prop-section"><p className="prop-title">Signature</p><button type="button" className="btn btn-secondary btn-block" onClick={onSignature}><FaSignature /> Create or change signature…</button></div>
   }
   if (tool === 'whiteout') {
-    return <div className="prop-section"><p className="prop-title">Whiteout</p><p className="notice"><FaEraser />Drag over the area to cover. It hides what is underneath but does not delete it.</p></div>
+    return <div className="prop-section"><p className="prop-title">Whiteout</p><p className="notice"><FaEraser />Drag over the area you want to hide.</p></div>
   }
   return null
 }
@@ -533,7 +558,7 @@ function DocumentInfo({ info }) {
           <span>Nudge (×10 with Shift)</span><span><kbd>←↑→↓</kbd></span>
         </div>
       </div>
-      <div className="prop-section"><p className="notice success"><FaShieldAlt />Your PDF is processed on this device. Nothing is uploaded.</p></div>
+      <div className="prop-section"><p className="notice success"><FaShieldAlt />Your PDF stays on this device.</p></div>
     </>
   )
 }
@@ -541,6 +566,7 @@ function DocumentInfo({ info }) {
 export function PropertiesPanel({
   selection, tool, toolSettings, onToolSettings, objectActions, blockBusy, onBlockStyle, onImage, imageBusy,
   localFonts, fonts, editorDraft, documentInfo, onClose, onChooseImage, onSignature,
+  collapsible = false, collapsed = false, onToggleCollapsed,
 }) {
   let title = 'Properties'
   let subtitle = 'Document'
@@ -567,15 +593,22 @@ export function PropertiesPanel({
     }
   }
   return (
-    <aside className="side-panel right" aria-label="Properties">
-      <div className="panel-head">
-        <div><h2>{title}</h2><small>{subtitle}</small></div>
-        <button type="button" className="icon-btn sm" onClick={onClose} title="Hide panel"><FaTimes /></button>
+    <aside className={`side-panel right ${collapsible && collapsed ? 'collapsed' : ''}`} aria-label="Properties">
+      <div className="panel-head" onClick={collapsible ? (event) => { if (!event.target.closest('button')) onToggleCollapsed?.() } : undefined}>
+        <div><h2>{title}</h2><small>{collapsible && collapsed ? 'Tap to show options' : subtitle}</small></div>
+        <div style={{ display: 'flex', gap: 2 }}>
+          {collapsible && (
+            <button type="button" className="icon-btn sm" onClick={onToggleCollapsed} title={collapsed ? 'Show options' : 'Make smaller'} aria-label={collapsed ? 'Show options' : 'Make smaller'}>
+              {collapsed ? <FaChevronUp /> : <FaChevronDown />}
+            </button>
+          )}
+          <button type="button" className="icon-btn sm" onClick={onClose} title="Hide panel" aria-label="Hide panel"><FaTimes /></button>
+        </div>
       </div>
       <div className="panel-body">
         {body}
         {localFonts.status === 'denied' && (selection?.kind === 'block' || tool === 'text' || selection?.object?.type === 'text') && (
-          <p className="notice warning" style={{ marginTop: 12 }}><FaDesktop />Font access is blocked in this browser, so only standard PDF fonts are listed. Allow it in Chrome or Edge site settings to use your computer’s fonts.</p>
+          <p className="notice warning" style={{ marginTop: 12 }}><FaDesktop />Font access is off, so only standard fonts are listed.</p>
         )}
       </div>
     </aside>

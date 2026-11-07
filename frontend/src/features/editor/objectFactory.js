@@ -34,6 +34,7 @@ export function objectLabel(object) {
   if (!object) return ''
   if (object.signature) return 'Signature'
   if (object.whiteout) return 'Whiteout'
+  if (object.imageTextPatch) return 'Image text cover'
   if (object.type === 'shape') return { rect: 'Rectangle', ellipse: 'Ellipse', line: 'Line', arrow: 'Arrow' }[object.shape] || 'Shape'
   if (object.type === 'highlight') return { underline: 'Underline', strikeout: 'Strikethrough' }[object.kind] || 'Highlight'
   return OBJECT_LABELS[object.type] || 'Object'

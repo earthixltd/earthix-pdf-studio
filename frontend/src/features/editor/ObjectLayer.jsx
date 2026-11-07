@@ -318,7 +318,7 @@ export function ObjectLayer({
       return
     }
     event.preventDefault()
-    event.currentTarget.setPointerCapture?.(event.pointerId)
+    try { event.currentTarget.setPointerCapture?.(event.pointerId) } catch { /* pointer already gone */ }
     if (tool === 'draw') setCreation({ kind: 'ink', pointerId: event.pointerId, points: [point] })
     else setCreation({ kind: tool === 'whiteout' ? 'whiteout' : settings.shape.shape, pointerId: event.pointerId, start: point, end: point })
   }
@@ -345,7 +345,7 @@ export function ObjectLayer({
 
   const onSurfacePointerUp = (event) => {
     if (!creation || creation.pointerId !== event.pointerId) return
-    event.currentTarget.releasePointerCapture?.(event.pointerId)
+    try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch { /* pointer already gone */ }
     const done = creation
     setCreation(null)
     if (done.kind === 'ink') {
@@ -384,7 +384,16 @@ export function ObjectLayer({
   // ---------------------------------------------------------------------------
 
   const frameBox = selected && !editingObject ? displayBox(selected) : null
-  const handles = handlesFor(selected)
+  // Thin items (lines of text, rules) get fewer handles so they never pile up.
+  const handles = handlesFor(selected).filter((handle) => {
+    if (!frameBox) return true
+    const widthPx = frameBox.width * scale
+    const heightPx = frameBox.height * scale
+    if (heightPx < 26 && widthPx < 26) return handle.id === 'se'
+    if (heightPx < 26) return handle.hy === 0
+    if (widthPx < 26) return handle.hx === 0
+    return true
+  })
   const showRotate = selected && canRotate(selected) && !selected.locked
   const editing = editingObject && editingObject.pageIndex === pageIndex ? editingObject : null
 
@@ -395,7 +404,7 @@ export function ObjectLayer({
           <ObjectView
             key={object.id}
             object={object}
-            interactive={interactiveObjects && !busy}
+            interactive={interactiveObjects && !busy && !object.imageTextPatch}
             version={fontVersion}
             hideText={editing?.id === object.id}
             title={object.type === 'note' ? (object.text || 'Comment') : undefined}

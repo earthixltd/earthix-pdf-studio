@@ -118,7 +118,7 @@ test('uses the standard PDF font family when a non-embedded font lacks the typed
   // WinAnsi cannot encode the rupee sign; without installed fonts the edit must fail clearly.
   const bytes = createRawPdf('BT /F1 12 Tf 72 700 Td (Price 100) Tj ET')
   const before = await inspectNativePdfText(bytes)
-  await assert.rejects(() => replaceNativeTextBlock(bytes, blockWithText(before, 'Price 100'), 'Price ₹100'), /no matching font/)
+  await assert.rejects(() => replaceNativeTextBlock(bytes, blockWithText(before, 'Price 100'), 'Price ₹100'), /No font here can draw/)
 })
 
 const arialPath = findSystemFont(['arial.ttf', 'Arial.ttf'])

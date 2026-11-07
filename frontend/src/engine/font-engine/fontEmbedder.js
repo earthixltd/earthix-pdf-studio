@@ -5,7 +5,16 @@ import { loadStandardFontMetrics, winAnsiEncodeCharacter } from './standardFonts
 let fontkitPromise = null
 export function loadFontkit() {
   if (!fontkitPromise) {
-    fontkitPromise = import('@pdf-lib/fontkit').then((module) => module.default ?? module)
+    // fontkit's complex-script shapers (Devanagari, Arabic…) use generator
+    // code compiled for regenerator-runtime, which must exist globally.
+    fontkitPromise = import('regenerator-runtime/runtime.js')
+      .then((module) => {
+        const runtime = module.default ?? module
+        if (!globalThis.regeneratorRuntime && runtime?.mark) globalThis.regeneratorRuntime = runtime
+      })
+      .catch(() => undefined)
+      .then(() => import('@pdf-lib/fontkit'))
+      .then((module) => module.default ?? module)
   }
   return fontkitPromise
 }

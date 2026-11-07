@@ -10,14 +10,13 @@ export async function applyPagePlanToPdf(sourceBytes, plan) {
   const firstPageSize = source.getPage(0).getSize()
 
   for (const item of plan) {
-    let page
     if (item.isBlank) {
-      page = output.addPage([firstPageSize.width, firstPageSize.height])
+      output.addPage([firstPageSize.width, firstPageSize.height])
     } else {
       if (item.sourceIndex >= source.getPageCount()) {
         throw new Error(`Source page ${item.sourceIndex + 1} no longer exists.`)
       }
-      ;[page] = await output.copyPages(source, [item.sourceIndex])
+      const [page] = await output.copyPages(source, [item.sourceIndex])
       output.addPage(page)
       if (item.rotationDelta) {
         const currentAngle = source.getPage(item.sourceIndex).getRotation().angle

@@ -42,6 +42,7 @@ function TextShape({ object, hideText }) {
               fontSize: `${size}px`,
               whiteSpace: 'pre',
               fontKerning: isStandardFamily(object.fontFamily) ? 'none' : 'auto',
+              textRendering: 'geometricPrecision',
             }}
           >{line.text}</text>
           {object.underline && line.text.trim() && <rect x={line.x} y={line.baseline + size * 0.1} width={line.width} height={lineWidth} fill={object.color} />}

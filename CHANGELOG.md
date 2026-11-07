@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0 — Full editing toolkit and a new responsive design
+
+- New tools: Select, Edit PDF, Add text, Image, Highlight (also underline and strikethrough), Draw, Shapes (rectangle, ellipse, line, arrow), Comment, Sign and Whiteout, each with a keyboard shortcut.
+- Every added item can be moved, resized, rotated, duplicated, reordered and deleted, with undo/redo. A context-aware Properties panel sets font, size, colour, bold/italic/underline/strikethrough, alignment, line spacing, background, outline, fill, line width, opacity, rotation and exact position.
+- Existing PDF text can now be restyled (font family, size, colour, bold, italic) inside the PDF; text after it on the same line moves to fit. Existing page images can be moved, resized, rotated, replaced, faded or deleted.
+- Export writes added text, images, shapes and drawings as normal page content (searchable, visible in every viewer) and highlights/comments as standard PDF annotations. An /EarthixLayer keeps them adjustable when the file is reopened in Earthix; "Download flattened PDF" merges them permanently. Split, Organize and Optimize keep added items.
+- Signatures can be drawn, typed or uploaded and are remembered on this device.
+- New Deep Blue design with light and dark themes, Inter typography, slim navigation rail, Pages/Search/Items panel, and layouts for laptops, tablets (drawers) and phones (bottom tool dock and properties sheet, touch-friendly handles).
+- **Save** writes the changes straight into the opened PDF file (Chrome/Edge; other browsers download it, or ask where to save). **Export** still downloads a copy, and the menu has the flattened copy and Print. Ctrl+S saves.
+- "Optimize" is now **Compress** (download a smaller copy to share).
+- Phones: the properties sheet opens as a small bar so the page stays usable while editing; tap it to show all options. The page counter no longer wraps, tool hints wrap, and messages appear at the top.
+- Text boxes in Hindi and other complex scripts are shaped correctly with an installed font (fontkit now gets `regenerator-runtime`). Touch drags are more robust.
+- All lint errors fixed (including the older ones in CommandManager and the page planner).
+- **Existing Hindi text can now be edited.** Text read in visual glyph order is shown in typing order, and edits are redrawn with an installed font that has the same script (exact match when the PDF's font, e.g. Nirmala UI, is installed). Letters that a PDF left unlabelled (common in Chrome/Edge prints) are read back from the same installed font after font access is allowed. Arabic, Hebrew and Thai stay locked.
+- Fixed the PDFium renderer failing to start ("expected magic word … found <!do"): the worker was fetching `[object Object]` instead of the wasm file.
+- **Edit text inside pictures.** Select an image and choose "Edit text": the text is read on this device (OCR for English and Hindi, no upload), each line gets a box, and tapping one lets you retype it. The old letters are painted over with the surrounding background, and the new text keeps the measured colour, weight, size and baseline. Clearing the text removes it from the picture; deleting the edited text brings the original back.
+- Pinch and Ctrl+scroll now zoom the PDF only, so selection handles keep their size; thin items show fewer handles so they no longer pile up.
+- Friendlier, shorter messages everywhere (toasts, warnings, hints and panel notes).
+- New in-app "sweet" popups replace the browser's plain boxes: PDF password, first save into a file, reading Hindi with your fonts, flattened download and deleting an original image. The browser's own permission check for saving appears only once per file.
+- Fixed the custom colour picker (it reset before the colour could be applied, e.g. for Whiteout).
+- Cleaner welcome card: the tool list now sits under the heading; the page bar is hidden until a PDF is open.
+- `npm run dev:phone` / `START_ON_PHONE.bat` serve the editor on the local Wi-Fi for testing on a phone.
+- New engine modules in `engine/page-objects/` (page geometry, text layout, image codecs, object writer and reader) and 19 new tests (143 total).
+
 ## 0.2.0 — In-place text editing that keeps the original look
 
 - Click text on the page and type: an in-place editor opens over the original text (same font, size, weight, style, colour); Enter saves, Esc cancels. The side-panel replace form is replaced by a block list that opens the same editor.

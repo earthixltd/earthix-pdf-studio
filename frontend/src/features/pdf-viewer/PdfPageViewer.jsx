@@ -40,6 +40,7 @@ export function PdfPageViewer({
   renderOverlay,
   textLayerActive = true,
   selectedBlockKey = null,
+  onPinchZoom,
 }) {
   const viewportRef = useRef(null)
   const pageHostRef = useRef(null)
@@ -181,6 +182,76 @@ export function PdfPageViewer({
       pageProxy?.cleanup?.()
     }
   }, [session, pageIndex, zoomMode, zoom, viewportSize.width, viewportSize.height, engineStatus, onRenderError, onTextSelected, onZoomChange])
+
+  // Pinch (touch) and Ctrl+scroll (trackpad pinch) zoom the PDF, not the whole app,
+  // so toolbars and selection handles keep their size.
+  const pinchZoomRef = useRef(onPinchZoom)
+  pinchZoomRef.current = onPinchZoom
+  useEffect(() => {
+    const element = viewportRef.current
+    if (!element) return undefined
+    let wheelFactor = 1
+    let wheelTimer = null
+    const onWheel = (event) => {
+      if (!event.ctrlKey && !event.metaKey) return
+      event.preventDefault()
+      wheelFactor *= Math.exp(-event.deltaY * 0.0045)
+      window.clearTimeout(wheelTimer)
+      wheelTimer = window.setTimeout(() => {
+        const factor = wheelFactor
+        wheelFactor = 1
+        if (Math.abs(factor - 1) > 0.01) pinchZoomRef.current?.(factor)
+      }, 90)
+    }
+    const touches = new Map()
+    let startDistance = 0
+    let page = null
+    const distance = () => {
+      const [a, b] = [...touches.values()]
+      return Math.hypot(a.x - b.x, a.y - b.y)
+    }
+    const onPointerDown = (event) => {
+      if (event.pointerType !== 'touch') return
+      touches.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      if (touches.size === 2) {
+        startDistance = distance()
+        page = element.querySelector('.earthix-pdf-page')
+        if (page) page.style.transformOrigin = 'center top'
+      }
+    }
+    const onPointerMove = (event) => {
+      if (!touches.has(event.pointerId)) return
+      touches.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      if (touches.size === 2 && startDistance > 0 && page) {
+        const ratio = Math.max(0.4, Math.min(3, distance() / startDistance))
+        page.style.transform = `scale(${ratio})`
+      }
+    }
+    const onPointerUp = (event) => {
+      if (!touches.has(event.pointerId)) return
+      if (touches.size === 2 && startDistance > 0) {
+        const ratio = distance() / startDistance
+        if (page) page.style.transform = ''
+        if (Math.abs(ratio - 1) > 0.04) pinchZoomRef.current?.(Math.max(0.4, Math.min(3, ratio)))
+        startDistance = 0
+        page = null
+      }
+      touches.delete(event.pointerId)
+    }
+    element.addEventListener('wheel', onWheel, { passive: false })
+    element.addEventListener('pointerdown', onPointerDown, true)
+    window.addEventListener('pointermove', onPointerMove, true)
+    window.addEventListener('pointerup', onPointerUp, true)
+    window.addEventListener('pointercancel', onPointerUp, true)
+    return () => {
+      window.clearTimeout(wheelTimer)
+      element.removeEventListener('wheel', onWheel)
+      element.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('pointermove', onPointerMove, true)
+      window.removeEventListener('pointerup', onPointerUp, true)
+      window.removeEventListener('pointercancel', onPointerUp, true)
+    }
+  }, [])
 
   useEffect(() => {
     if (session) return

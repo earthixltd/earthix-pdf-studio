@@ -14,11 +14,11 @@
 .create-surface.cursor-note, .create-surface.cursor-signature { cursor: copy; }
 .create-surface.cursor-draw { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'%3E%3Ccircle cx='11' cy='11' r='4' fill='none' stroke='%232454E6' stroke-width='2'/%3E%3Ccircle cx='11' cy='11' r='1' fill='%232454E6'/%3E%3C/svg%3E") 11 11, crosshair; }
 
-.selection-frame { position: absolute; z-index: 3; box-sizing: border-box; border: 1.5px solid #2454e6; border-radius: 1px; pointer-events: none; transform-origin: center; box-shadow: 0 0 0 1px rgb(255 255 255 / 70%); }
+.selection-frame { position: absolute; z-index: 3; box-sizing: border-box; border: calc(1.5px * var(--ui-scale, 1)) solid #2454e6; border-radius: 1px; pointer-events: none; transform-origin: center; box-shadow: 0 0 0 1px rgb(255 255 255 / 70%); }
 .selection-frame.type-highlight, .selection-frame.type-note { border-style: dashed; }
 .selection-frame.is-locked { border-color: #b54708; border-style: dashed; }
 .frame-body { position: absolute; inset: 0; pointer-events: auto; cursor: move; touch-action: none; }
-.frame-handle { position: absolute; width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; border: 1.5px solid #2454e6; border-radius: 3px; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 20%); pointer-events: auto; touch-action: none; }
+.frame-handle { --s: var(--ui-scale, 1); position: absolute; width: calc(11px * var(--s)); height: calc(11px * var(--s)); margin: calc(-5.5px * var(--s)) 0 0 calc(-5.5px * var(--s)); border: calc(1.5px * var(--s)) solid #2454e6; border-radius: 3px; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 20%); pointer-events: auto; touch-action: none; }
 .frame-handle::after { content: ''; position: absolute; inset: -9px; }
 .h-nw { top: 0; left: 0; cursor: nwse-resize; }
 .h-n { top: 0; left: 50%; cursor: ns-resize; }
@@ -28,15 +28,15 @@
 .h-s { top: 100%; left: 50%; cursor: ns-resize; }
 .h-sw { top: 100%; left: 0; cursor: nesw-resize; }
 .h-w { top: 50%; left: 0; cursor: ew-resize; }
-.type-text .h-e, .type-text .h-w { width: 7px; height: 18px; margin: -9px 0 0 -3.5px; border-radius: 4px; }
-.frame-rotate { position: absolute; top: -30px; left: 50%; width: 16px; height: 16px; margin-left: -8px; border: 1.5px solid #2454e6; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 20%); pointer-events: auto; touch-action: none; cursor: grab; }
-.frame-rotate::before { content: ''; position: absolute; top: 14px; left: 50%; width: 1.5px; height: 14px; margin-left: -.75px; background: #2454e6; }
+.type-text .h-e, .type-text .h-w { width: calc(7px * var(--s)); height: calc(18px * var(--s)); margin: calc(-9px * var(--s)) 0 0 calc(-3.5px * var(--s)); border-radius: 4px; }
+.frame-rotate { --s: var(--ui-scale, 1); position: absolute; top: calc(-30px * var(--s)); left: 50%; width: calc(16px * var(--s)); height: calc(16px * var(--s)); margin-left: calc(-8px * var(--s)); border: calc(1.5px * var(--s)) solid #2454e6; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 20%); pointer-events: auto; touch-action: none; cursor: grab; }
+.frame-rotate::before { content: ''; position: absolute; top: calc(14px * var(--s)); left: 50%; width: calc(1.5px * var(--s)); height: calc(14px * var(--s)); margin-left: calc(-.75px * var(--s)); background: #2454e6; }
 .frame-rotate::after { content: ''; position: absolute; inset: -8px; }
-.endpoint-handle { position: absolute; z-index: 4; width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; border: 2px solid #2454e6; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); pointer-events: auto; touch-action: none; cursor: crosshair; }
+.endpoint-handle { --s: var(--ui-scale, 1); position: absolute; z-index: 4; width: calc(13px * var(--s)); height: calc(13px * var(--s)); margin: calc(-6.5px * var(--s)) 0 0 calc(-6.5px * var(--s)); border: calc(2px * var(--s)) solid #2454e6; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); pointer-events: auto; touch-action: none; cursor: crosshair; }
 .object-drag-proxy { position: absolute; inset: 0; z-index: 2; overflow: visible; pointer-events: none; }
 .object-drag-proxy line { stroke: transparent; stroke-linecap: round; pointer-events: stroke; cursor: move; touch-action: none; }
 
-.text-object-editor { position: absolute; z-index: 5; box-sizing: border-box; margin: 0; outline: 1.5px dashed #2454e6; outline-offset: 2px; pointer-events: auto; cursor: text; caret-color: #2454e6; overflow-wrap: break-word; user-select: text; -webkit-user-select: text; }
+.text-object-editor { text-rendering: geometricPrecision; position: absolute; z-index: 5; box-sizing: border-box; margin: 0; outline: 1.5px dashed #2454e6; outline-offset: 2px; pointer-events: auto; cursor: text; caret-color: #2454e6; overflow-wrap: break-word; user-select: text; -webkit-user-select: text; }
 .text-object-editor:empty::before { content: 'Type here'; color: #98a2b3; }
 
 .page-image-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
@@ -58,3 +58,11 @@
 .signature-choice.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .signature-saved { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
 .signature-saved img, .signature-saved svg { width: 120px; height: 44px; object-fit: contain; background: #fff; border-radius: 4px; }
+
+/* Text found inside pictures (OCR) */
+.image-text-layer { position: absolute; inset: 0; z-index: 8; pointer-events: none; }
+.image-text-line { position: absolute; padding: 0; border: 1.5px dashed #2454e6; border-radius: 4px; background: rgb(36 84 230 / 8%); pointer-events: auto; cursor: text; animation: image-text-in .25s ease both; }
+.image-text-line:hover { border-style: solid; background: rgb(36 84 230 / 14%); }
+.image-text-status { position: sticky; top: 12px; display: flex; align-items: center; gap: 8px; width: max-content; margin: 12px auto 0; padding: 7px 14px; border-radius: 99px; color: #fff; background: rgb(27 35 51 / 88%); font-size: 13px; font-weight: 500; pointer-events: auto; }
+.image-text-done { position: sticky; top: 12px; display: block; margin: 12px 12px 0 auto; padding: 6px 14px; border: 0; border-radius: 99px; color: #fff; background: #2454e6; font-size: 13px; font-weight: 600; pointer-events: auto; box-shadow: 0 4px 12px rgb(36 84 230 / 30%); }
+@keyframes image-text-in { from { opacity: 0; transform: scale(.97); } }

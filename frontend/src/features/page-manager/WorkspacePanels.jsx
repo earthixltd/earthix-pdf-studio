@@ -13,7 +13,7 @@ export function HomeWorkspace({ onOpenPdf, onMerge, recentFiles, onOpenRecent, p
         <span className="workspace-hero-icon"><FaFilePdf /></span>
         <p className="workspace-eyebrow">EARTHIX PDF STUDIO</p>
         <h1>Everything you need to work with PDFs.</h1>
-        <p>Open a document or choose a tool. Your files stay on this device during local processing.</p>
+        <p>Open a PDF or pick a tool. Your files never leave this device.</p>
         <div className="workspace-hero-actions">
           <button type="button" className="primary-workspace-button" onClick={onOpenPdf}><FaUpload /> Open PDF</button>
           <button type="button" className="secondary-workspace-button" onClick={onMerge}><FaFolderOpen /> Merge PDFs</button>
@@ -21,11 +21,11 @@ export function HomeWorkspace({ onOpenPdf, onMerge, recentFiles, onOpenRecent, p
       </div>
       <div className="workspace-home-grid">
         <article className="workspace-info-card"><span className="workspace-card-icon"><FaFilePdf /></span><strong>Current document</strong><b>{fileName || 'No document open'}</b><small>{pageCount ? `${pageCount} pages ready to edit` : 'Open a PDF to get started'}</small></article>
-        <article className="workspace-info-card"><span className="workspace-card-icon"><FaScissors /></span><strong>Quick workflow</strong><b>Split, reorder and optimize</b><small>Choose a workspace tool from the sidebar.</small></article>
+        <article className="workspace-info-card"><span className="workspace-card-icon"><FaScissors /></span><strong>Quick workflow</strong><b>Split, reorder and compress</b><small>Find them in the menu on the left.</small></article>
       </div>
       <section className="workspace-recent-card">
         <div className="workspace-section-heading"><div><h2>Recent files</h2><p>Files opened in this browser session</p></div></div>
-        {recentFiles.length ? <div className="workspace-recent-list">{recentFiles.map((item, index) => <button type="button" key={`${item.name}-${item.openedAt}-${index}`} onClick={() => onOpenRecent(item)}><FaFilePdf /><span><strong>{item.name}</strong><small>{item.sizeLabel}</small></span><small>Open</small></button>)}</div> : <div className="workspace-empty-state">No recent files yet. Open a PDF and it will appear here.</div>}
+        {recentFiles.length ? <div className="workspace-recent-list">{recentFiles.map((item, index) => <button type="button" key={`${item.name}-${item.openedAt}-${index}`} onClick={() => onOpenRecent(item)}><FaFilePdf /><span><strong>{item.name}</strong><small>{item.sizeLabel}</small></span><small>Open</small></button>)}</div> : <div className="workspace-empty-state">Nothing here yet — files you open will show up here.</div>}
       </section>
     </section>
   )
@@ -34,7 +34,7 @@ export function HomeWorkspace({ onOpenPdf, onMerge, recentFiles, onOpenRecent, p
 export function SplitWorkspace({ pageCount, fileName, fromPage, toPage, setFromPage, setToPage, onSplit, processing, onOpenPdf }) {
   return (
     <section className="workspace-tool-panel">
-      <div className="workspace-tool-heading"><span className="workspace-tool-icon"><FaScissors /></span><div><p className="workspace-eyebrow">WORKSPACE TOOL</p><h1>Split PDF</h1><p>Extract a page range into a separate PDF file. The original document stays unchanged.</p></div></div>
+      <div className="workspace-tool-heading"><span className="workspace-tool-icon"><FaScissors /></span><div><p className="workspace-eyebrow">WORKSPACE TOOL</p><h1>Split PDF</h1><p>Save some pages as a new PDF. Your original stays the same.</p></div></div>
       {pageCount ? <div className="split-tool-card">
         <div className="split-source-file"><FaFilePdf /><span><strong>{fileName}</strong><small>{pageCount} pages available</small></span></div>
         <div className="split-range-fields"><label>Start page<input type="number" min="1" max={pageCount} value={fromPage} onChange={(event) => setFromPage(event.target.value)} /></label><span className="split-range-separator">to</span><label>End page<input type="number" min="1" max={pageCount} value={toPage} onChange={(event) => setToPage(event.target.value)} /></label></div>
@@ -49,7 +49,7 @@ export function OrganizeWorkspace({ session, plan, onMove, onRotate, onRemove, o
   const [dragIndex, setDragIndex] = useState(null)
   return (
     <section className="workspace-tool-panel organize-tool-panel">
-      <div className="workspace-tool-heading"><span className="workspace-tool-icon"><FaFilePdf /></span><div><p className="workspace-eyebrow">WORKSPACE TOOL</p><h1>Organize Pages</h1><p>Reorder, rotate, remove or add pages. Changes are applied to the PDF only when you confirm.</p></div></div>
+      <div className="workspace-tool-heading"><span className="workspace-tool-icon"><FaFilePdf /></span><div><p className="workspace-eyebrow">WORKSPACE TOOL</p><h1>Organize Pages</h1><p>Drag pages to reorder, rotate or remove them. Nothing changes until you apply.</p></div></div>
       {session ? <>
         <div className="organize-toolbar"><span>{plan.length} pages in output</span><div><button type="button" className="secondary-workspace-button compact" onClick={onAddBlank}><FaPlus /> Add blank page</button><button type="button" className="secondary-workspace-button compact" onClick={onReset} disabled={!changed}>Reset</button><button type="button" className="primary-workspace-button compact" onClick={onApply} disabled={!changed || processing}><FaCheck /> {processing ? 'Applying…' : 'Apply changes'}</button></div></div>
         <div className="organize-page-grid">

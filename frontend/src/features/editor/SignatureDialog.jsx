@@ -150,7 +150,7 @@ export function SignatureDialog({ onCancel, onConfirm }) {
               <div
                 className="signature-pad"
                 onPointerDown={(event) => {
-                  event.currentTarget.setPointerCapture?.(event.pointerId)
+                  try { event.currentTarget.setPointerCapture?.(event.pointerId) } catch { /* pointer already gone */ }
                   currentRef.current = [point(event)]
                   setStrokes((value) => [...value, currentRef.current])
                 }}

@@ -188,6 +188,8 @@ export async function interpretPageText(index, page, pageIndex, context) {
     if (!fontCache.has(cacheKey)) {
       const font = await loadPdfFont(index, fontValue)
       font.cacheKey = cacheKey
+      const recovered = context.recoveredGlyphs?.get(cacheKey)
+      if (recovered) font.recoveredGlyphs = recovered
       fontCache.set(cacheKey, font)
     }
     return fontCache.get(cacheKey)
@@ -570,7 +572,9 @@ function buildRun({ items, operator, operand, operatorToken, firstOperand, state
       continue
     }
     const nextGlyph = glyphs.slice(position + 1).find((candidate) => candidate.code !== undefined)
-    if (glyph.adjust <= -180 && lastCharacter && lastCharacter !== ' ' && nextGlyph && nextGlyph.unicode[0] !== ' ') {
+    // [+a, mark, -a] positions a combining mark (Indic matras, accents); it is not a word gap.
+    const markOffset = glyphs[position - 1]?.code !== undefined && glyphs[position - 2]?.adjust !== undefined && Math.abs(glyphs[position - 2].adjust + glyph.adjust) < 1
+    if (!markOffset && glyph.adjust <= -180 && lastCharacter && lastCharacter !== ' ' && nextGlyph && nextGlyph.unicode[0] !== ' ') {
       glyph.virtualSpace = true
       textValue += ' '
       lastCharacter = ' '

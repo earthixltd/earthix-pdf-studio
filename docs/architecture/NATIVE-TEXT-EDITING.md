@@ -45,8 +45,10 @@ original graphics state.
 
 * No paragraph re-wrap: a longer line is not wrapped onto the next line.
 * Underlines, highlights and links do not move with shifted text.
-* Hindi and other complex scripts (Indic, Arabic, Hebrew, Thai) are locked: PDFs store them as shaped glyphs whose order
-  differs from Unicode order, so they cannot be edited safely yet.
+* Hindi and other Indic scripts are edited by redrawing the whole block with an installed font of the same script
+  (`engine/font-engine/indicText.js` restores typing order; `glyphRecovery.js` reads unlabelled conjunct glyphs from the
+  same installed font). Without such a font (or without font access in Chrome/Edge) the edit is refused with a message.
+  Arabic, Hebrew and Thai remain locked.
 * Encrypted PDFs must be decrypted first. Vertical (Identity-V) text and fonts without any Unicode information are locked.
 * Exact-font fallback needs Chrome or Edge with font access allowed for the site; otherwise a standard PDF font
   (Helvetica/Times/Courier, metric-compatible with Arial/Times New Roman/Courier New) is used and the user is told.

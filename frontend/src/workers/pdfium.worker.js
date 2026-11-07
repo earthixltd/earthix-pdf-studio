@@ -27,7 +27,8 @@ function initializePdfiumOrThrow() {
   return pdfiumModule
 }
 
-async function initialize(wasmUrl) {
+async function initialize(payload = {}) {
+  const wasmUrl = typeof payload === 'string' ? payload : payload.wasmUrl
   if (pdfiumModule) return { initialized: true, wasmSource }
   if (!wasmUrl) throw new Error('The local PDFium WebAssembly asset URL is missing.')
 
