@@ -1,5 +1,5 @@
 import { createEmbeddedFontEncoder, createStandardFontEncoder, fontCoversText, openFontProgram } from './fontEmbedder.js'
-import { normalizeFontKey } from './pdfFontLoader.js'
+import { normalizeFontKey, weightFromStyle } from './pdfFontLoader.js'
 import { standardFamilyFor, standardFontName } from './standardFonts.js'
 
 const SANS = ['Arial', 'Helvetica', 'Liberation Sans', 'Arimo', 'Segoe UI', 'DejaVu Sans', 'Noto Sans']
@@ -50,15 +50,21 @@ const SCRIPT_FALLBACKS = [
   [/[₹]/, ['Nirmala UI', 'Segoe UI', 'Arial']],
 ]
 
-const isBoldStyle = (style) => /bold|black|heavy|semibold|demi/i.test(style || '')
 const isItalicStyle = (style) => /italic|oblique/i.test(style || '')
-const isUnusualStyle = (style) => /light|thin|narrow|condensed|extended|medium|semilight|extra|ultra/i.test(style || '')
+const isWidthVariant = (style) => /narrow|condensed|compressed|extended|expanded/i.test(style || '')
 
-function styleScore(entry, request) {
-  return (isBoldStyle(entry.style) !== Boolean(request.bold) ? 4 : 0) +
-    (isItalicStyle(entry.style) !== Boolean(request.italic) ? 2 : 0) +
-    (isUnusualStyle(entry.style) ? 1 : 0)
+export function requestedWeight(request) {
+  return Number.isFinite(request?.weight) && request.weight > 0 ? request.weight : request?.bold ? 700 : 400
 }
+
+/** How far an installed style is from the wanted weight and slant; 0 is an exact match. */
+export function styleDistance(style, request) {
+  return Math.abs((weightFromStyle(style) ?? 400) - requestedWeight(request)) / 100 +
+    (isItalicStyle(style) !== Boolean(request.italic) ? 2 : 0) +
+    (isWidthVariant(style) ? 1 : 0)
+}
+
+const styleScore = (entry, request) => styleDistance(entry.style, request)
 
 /**
  * A font provider returns font files that can be embedded. Entries look like
@@ -135,7 +141,10 @@ function candidateFamilies(request, text) {
 export async function resolveFallbackFont(request, text, fontProvider) {
   const entries = fontProvider ? await fontProvider.listFonts().catch(() => []) : []
   const tried = new Set()
-  const tryEntry = async (entry, match) => {
+  const familyKey = normalizeFontKey(request.family)
+  // A font with close, well-known substitutes (Arial, Times…) can safely borrow their look.
+  const hasKnownSubstitute = Object.keys(SUBSTITUTES).some((key) => familyKey === key || familyKey.startsWith(key))
+  const tryEntry = async (entry, match, sameFamily = false) => {
     if (!entry || tried.has(entry.postscriptName + '|' + entry.fullName)) return null
     tried.add(entry.postscriptName + '|' + entry.fullName)
     try {
@@ -143,7 +152,7 @@ export async function resolveFallbackFont(request, text, fontProvider) {
       const program = await openFontProgram(bytes, entry.postscriptName)
       if (!fontCoversText(program, text)) return null
       const encoder = await createEmbeddedFontEncoder(bytes, entry.postscriptName, entry.fullName)
-      return { encoder, match, label: entry.fullName || entry.postscriptName }
+      return { encoder, match, label: entry.fullName || entry.postscriptName, related: sameFamily || hasKnownSubstitute }
     } catch {
       return null
     }
@@ -154,7 +163,7 @@ export async function resolveFallbackFont(request, text, fontProvider) {
     const wantFamily = normalizeFontKey(request.family)
     // 1. Exact PostScript name.
     for (const entry of entries.filter((item) => normalizeFontKey(item.postscriptName) === wantPostscript)) {
-      const result = await tryEntry(entry, 'exact')
+      const result = await tryEntry(entry, 'exact', true)
       if (result) return result
     }
     // 2. Same family, best matching style.
@@ -162,14 +171,14 @@ export async function resolveFallbackFont(request, text, fontProvider) {
       .filter((item) => normalizeFontKey(item.family) === wantFamily || normalizeFontKey(item.fullName) === wantFamily)
       .sort((a, b) => styleScore(a, request) - styleScore(b, request))
     for (const entry of sameFamily) {
-      const result = await tryEntry(entry, styleScore(entry, request) === 0 ? 'exact' : 'similar')
+      const result = await tryEntry(entry, styleScore(entry, request) === 0 ? 'exact' : 'similar', true)
       if (result) return result
     }
     // 3. Similar families.
     for (const family of candidateFamilies(request, text)) {
-      const familyKey = normalizeFontKey(family)
+      const candidateKey = normalizeFontKey(family)
       const matches = entries
-        .filter((item) => normalizeFontKey(item.family) === familyKey)
+        .filter((item) => normalizeFontKey(item.family) === candidateKey)
         .sort((a, b) => styleScore(a, request) - styleScore(b, request))
       for (const entry of matches) {
         const result = await tryEntry(entry, 'similar')
@@ -180,8 +189,8 @@ export async function resolveFallbackFont(request, text, fontProvider) {
 
   // 4. Standard PDF fonts (no embedding needed, Latin text only).
   const family = standardFamilyFor(normalizeFontKey(request.family), { serif: request.serif, fixedPitch: request.fixedPitch })
-  const standardName = standardFontName(family === 'Symbol' || family === 'ZapfDingbats' ? 'Helvetica' : family, request.bold, request.italic)
+  const standardName = standardFontName(family === 'Symbol' || family === 'ZapfDingbats' ? 'Helvetica' : family, requestedWeight(request) >= 600, request.italic)
   const encoder = createStandardFontEncoder(standardName)
-  if (encoder.canEncode(text)) return { encoder, match: 'standard', label: standardName }
+  if (encoder.canEncode(text)) return { encoder, match: 'standard', label: standardName, related: hasKnownSubstitute }
   return null
 }

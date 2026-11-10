@@ -115,7 +115,7 @@ The sidebar now contains only the `WORKSPACE` group. The `YOUR FILES` group and 
 - **Merge PDF:** select at least two PDFs; the merged result opens in the editor.
 - **Split PDF:** select a continuous start/end page range and export it as a new PDF.
 - **Organize Pages:** drag/drop or move pages, rotate, delete, append a blank page, then apply the plan.
-- **Optimize PDF:** exports an optimized copy using pdf-lib object streams.
+- **Compress PDF:** downloads a smaller copy using pdf-lib object streams.
 
 Page organizer implementation lives in `frontend/src/features/page-manager/`. The page plan is validated before export and committed to Document Core as a single undoable PDF-bytes command. PDF catalog-level structures that pdf-lib does not preserve (for example some forms, outlines, attachments, and certain annotation data) may not survive page-copy operations; this tool should be used on a copy when those structures are important.
 
@@ -130,7 +130,7 @@ The sidebar now contains only the `WORKSPACE` group. The `YOUR FILES` group and 
 - **Merge PDF:** select at least two PDFs; the merged result opens in the editor.
 - **Split PDF:** select a continuous start/end page range and export it as a new PDF.
 - **Organize Pages:** drag/drop or move pages, rotate, delete, append a blank page, then apply the plan.
-- **Optimize PDF:** exports an optimized copy using pdf-lib object streams.
+- **Compress PDF:** downloads a smaller copy using pdf-lib object streams.
 
 Page organizer implementation lives in `frontend/src/features/page-manager/`. The page plan is validated before export and committed to Document Core as a single undoable PDF-bytes command. PDF catalog-level structures that pdf-lib does not preserve (for example some forms, outlines, attachments, and certain annotation data) may not survive page-copy operations; this tool should be used on a copy when those structures are important.
 

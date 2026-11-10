@@ -1,26 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
 import { FaFilePdf, FaSpinner } from 'react-icons/fa'
 
-export function PdfPageThumbnail({ session, pageIndex, active = false, onClick }) {
+export function PdfPageThumbnail({ session, pageIndex, active = false, enabled = true, onClick }) {
   const buttonRef = useRef(null)
   const canvasRef = useRef(null)
   const [status, setStatus] = useState('idle')
 
   useEffect(() => {
-    if (!session || !buttonRef.current || !canvasRef.current) return undefined
+    if (!session || !enabled || !buttonRef.current || !canvasRef.current) return undefined
 
     let cancelled = false
     let started = false
     let observer
     const visibleCanvas = canvasRef.current
-    visibleCanvas.width = 0
-    visibleCanvas.height = 0
-    setStatus('idle')
+    setStatus((current) => (current === 'ready' ? 'ready' : 'idle'))
 
     const render = async () => {
       if (started || cancelled || !visibleCanvas) return
       started = true
-      setStatus('loading')
+      setStatus((current) => (current === 'ready' ? 'ready' : 'loading'))
       const renderCanvas = document.createElement('canvas')
 
       try {
@@ -53,7 +51,7 @@ export function PdfPageThumbnail({ session, pageIndex, active = false, onClick }
           observer?.disconnect()
         }
       }, {
-        root: buttonRef.current.closest('.pages-list'),
+        root: buttonRef.current.closest('.panel-body'),
         rootMargin: '100px 0px',
       })
       observer.observe(buttonRef.current)
@@ -62,10 +60,8 @@ export function PdfPageThumbnail({ session, pageIndex, active = false, onClick }
     return () => {
       cancelled = true
       observer?.disconnect()
-      visibleCanvas.width = 0
-      visibleCanvas.height = 0
     }
-  }, [session, pageIndex])
+  }, [session, pageIndex, enabled])
 
   return (
     <button

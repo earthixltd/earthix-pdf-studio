@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { cssFontFamily, isStandardFamily } from '../../engine/page-objects/textLayout.js'
+import { cssFontFamily, isStandardFamily, textWeight } from '../../engine/page-objects/textLayout.js'
 import { arrowHeadSegments, arrowShaftEnd, ellipseSegments, rectSegments, segmentsToSvg, strokeSegments } from '../../engine/page-objects/shapePaths.js'
 import { layoutTextObject } from './textMeasure.js'
 import { imageUrlFor } from './imageImport.js'
@@ -37,7 +37,7 @@ function TextShape({ object, hideText }) {
             fill={object.color || '#000000'}
             style={{
               fontFamily: cssFontFamily(object.fontFamily),
-              fontWeight: object.bold ? 700 : 400,
+              fontWeight: textWeight(object),
               fontStyle: object.italic ? 'italic' : 'normal',
               fontSize: `${size}px`,
               whiteSpace: 'pre',

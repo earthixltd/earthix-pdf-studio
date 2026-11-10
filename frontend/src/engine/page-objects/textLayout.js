@@ -21,6 +21,11 @@ export function standardFontFor(family, bold, italic) {
   return standardFontName(isStandardFamily(family) ? family : 'Helvetica', bold, italic)
 }
 
+/** Numeric weight of a text object; older items only carry the bold flag. */
+export function textWeight(object) {
+  return Number.isFinite(object?.weight) && object.weight > 0 ? object.weight : object?.bold ? 700 : 400
+}
+
 export function cssFontFamily(family) {
   const standard = STANDARD_BY_ID.get(family)
   if (standard) return standard.css

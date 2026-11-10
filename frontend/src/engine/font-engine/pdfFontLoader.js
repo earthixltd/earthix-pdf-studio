@@ -92,6 +92,32 @@ function splitCamel(value) {
   return value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').trim()
 }
 
+/** Numeric CSS weight named by a font style such as "Semibold Italic"; null when it names none. */
+export function weightFromStyle(style) {
+  const text = String(style || '').toLowerCase().replace(/[\s_-]+/g, '')
+  if (!text) return null
+  if (/hairline|thin/.test(text)) return 100
+  if (/(extra|ultra)light/.test(text)) return 200
+  if (/light/.test(text)) return 300
+  if (/(semi|demi)bold|demi/.test(text)) return 600
+  if (/(extra|ultra)bold|heavy/.test(text)) return 800
+  if (/black/.test(text)) return 900
+  if (/bold/.test(text)) return 700
+  if (/medium/.test(text)) return 500
+  if (/regular|book|normal|roman|plain/.test(text)) return 400
+  return null
+}
+
+const WEIGHT_WORDS = 'Hairline|Thin|ExtraLight|UltraLight|SemiLight|DemiLight|Light|Regular|Book|Medium|SemiBold|DemiBold|Demi|ExtraBold|UltraBold|Bold|Heavy|ExtraBlack|Black'
+// Only a word at the end of the family counts: "ArialBlack" is heavy, "Blackadder" is not.
+const TRAILING_WEIGHT = new RegExp(`(?<=[a-z0-9])(${WEIGHT_WORDS})(?:Italic|Oblique)?$`)
+const TRAILING_WEIGHT_CAPS = new RegExp(`.(${WEIGHT_WORDS})(?:Italic|Oblique)?$`, 'i')
+
+function trailingWeightWord(family) {
+  const match = TRAILING_WEIGHT.exec(family) || (family === family.toUpperCase() ? TRAILING_WEIGHT_CAPS.exec(family) : null)
+  return match ? match[1] : ''
+}
+
 /** Split a PostScript-like font name into a human family and style hints. */
 export function describeFontName(fontName) {
   const postscriptName = stripSubsetTag(fontName || '')
@@ -99,11 +125,13 @@ export function describeFontName(fontName) {
   const familyRaw = familyPart.replace(/(PSMT|PS|MT)$/, '')
   const styleText = styleParts.join(' ')
   const all = postscriptName.toLowerCase()
+  const weight = weightFromStyle(`${styleText} ${trailingWeightWord(familyRaw)}`)
   return {
     postscriptName,
     family: splitCamel(familyRaw) || postscriptName,
     style: styleText.replace(/MT$|PS$/, '').trim(),
-    bold: /bold|black|heavy|semibold|demibold|demi\b/.test(all),
+    weight,
+    bold: (weight ?? 400) >= 600 || /bold|heavy/.test(all),
     italic: /italic|oblique|-it\b|,it\b/.test(all),
   }
 }
@@ -250,7 +278,7 @@ export class PdfFontInfo {
       subtype: this.subtype,
       encoding: this.encodingName,
       fontFlags: this.flags,
-      fontWeight: this.bold ? 700 : 400,
+      fontWeight: this.weight ?? (this.bold ? 700 : 400),
       fontStyle: this.italic ? 'italic' : 'normal',
       isBold: this.bold,
       isItalic: this.italic,
@@ -258,6 +286,8 @@ export class PdfFontInfo {
       isFixedPitch: this.fixedPitch,
       isSubset: this.isSubset,
       isEmbedded: this.isEmbedded,
+      isComposite: Boolean(this.isComposite),
+      codeMap: [...this.getUnicodeToCode()],
       embeddedFontProgram: this.fontFileKey,
       hasToUnicode: this.toUnicode.size > 0,
       unicodeMapEntries: this.toUnicode.size,
@@ -338,6 +368,9 @@ export async function loadPdfFont(index, fontValue) {
   const weight = asNumber(index.resolve(descriptorDict.get('FontWeight')), 0)
   font.italic = Boolean(font.flags & FLAG_ITALIC) || naming.italic || Math.abs(italicAngle) > 2
   font.bold = Boolean(font.flags & FLAG_FORCE_BOLD) || weight >= 600 || naming.bold
+  // The name is the most reliable source; the descriptor fills in when it says nothing.
+  font.weight = naming.weight ?? (weight >= 100 && weight <= 900 ? Math.round(weight / 100) * 100 : font.bold ? 700 : 400)
+  if (font.bold && font.weight < 600) font.weight = 700
   font.fixedPitch = Boolean(font.flags & FLAG_FIXED_PITCH) || /courier|mono|consol/i.test(font.family)
   font.serif = Boolean(font.flags & FLAG_SERIF) || /times|serif|roman|georgia|garamond|cambria|book antiqua|palatino/i.test(font.family) && !/sans/i.test(font.family)
   font.symbolic = Boolean(font.flags & FLAG_SYMBOLIC) && !(font.flags & 32)

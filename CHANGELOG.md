@@ -15,6 +15,10 @@
 - All lint errors fixed (including the older ones in CommandManager and the page planner).
 - **Existing Hindi text can now be edited.** Text read in visual glyph order is shown in typing order, and edits are redrawn with an installed font that has the same script (exact match when the PDF's font, e.g. Nirmala UI, is installed). Letters that a PDF left unlabelled (common in Chrome/Edge prints) are read back from the same installed font after font access is allowed. Arabic, Hebrew and Thai stay locked.
 - Fixed the PDFium renderer failing to start ("expected magic word … found <!do"): the worker was fetching `[object Object]` instead of the wasm file.
+- **Refresh keeps your work.** The open PDF, every edit, added items, page, zoom and scroll position are kept in this browser and come back after a refresh or restart. Undo history starts fresh after a refresh. The new × on the file name closes the PDF and clears it from the browser.
+- **Much faster opening.** Pages are drawn by PDFium straight away instead of PDF.js first and PDFium again; unrelated app updates no longer redraw the page; thumbnails and text analysis wait for the first page; PDF.js reuses one worker; the renderers load before a file is chosen.
+- New look: Earthix logo, teal colour, light theme only, no shadows.
+- Removed things that added nothing: dark mode, the document info and shortcuts panels, font details, Home filler cards, repeating tool hints (now shown once), unused components and assets.
 - **Fixed pages sometimes showing garbled, blank, recoloured or missing content** after opening, editing or saving: the PDFium renderer freed the PDF's memory right after loading while it still read from it. The buffer now lives until the document closes (with a runtime regression test). Added content streams also start on a new line so every viewer separates them correctly.
 - **Edit text inside pictures.** Select an image and choose "Edit text": the text is read on this device (OCR for English and Hindi, no upload), each line gets a box, and tapping one lets you retype it. The old letters are painted over with the surrounding background, and the new text keeps the measured colour, weight, size and baseline. Clearing the text removes it from the picture; deleting the edited text brings the original back.
 - Pinch and Ctrl+scroll now zoom the PDF only, so selection handles keep their size; thin items show fewer handles so they no longer pile up.
@@ -23,7 +27,10 @@
 - Fixed the custom colour picker (it reset before the colour could be applied, e.g. for Whiteout).
 - Cleaner welcome card: the tool list now sits under the heading; the page bar is hidden until a PDF is open.
 - `npm run dev:phone` / `START_ON_PHONE.bat` serve the editor on the local Wi-Fi for testing on a phone.
-- New engine modules in `engine/page-objects/` (page geometry, text layout, image codecs, object writer and reader) and 19 new tests (143 total).
+- **Every font keeps its look.** While typing, the text now shows in the PDF's own font for all embedded types (TrueType, CFF, Type 1, CID). A letter the font doesn't have borrows the closest font on its own; the rest of the line stays as it was.
+- **Weight control.** A Weight dropdown (Thin to Black) lists the weights a font really has on this computer, for PDF text, new text and added text boxes. Fallbacks now pick the nearest weight. Bold or italic on a font with no such style leaves the text unchanged instead of swapping the font.
+- Fixed large lines failing to save when a small number sat just before them.
+- New engine modules in `engine/page-objects/` (page geometry, text layout, image codecs, object writer and reader) and 19 new tests, with 8 tests for removed code dropped (146 total).
 
 ## 0.2.0 — In-place text editing that keeps the original look
 

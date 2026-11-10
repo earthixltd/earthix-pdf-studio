@@ -9,6 +9,7 @@ export async function openDocumentSession(input, {
   password,
   onProgress,
   signal,
+  pdfiumWaitMs = 4000,
 } = {}) {
   if (!pdfJsAdapter) {
     throw new PdfEngineError('The PDF.js adapter is required to create an Earthix document session.', {
@@ -108,6 +109,13 @@ export async function openDocumentSession(input, {
     },
     async renderPage(pageIndex, canvas, options) {
       assertOpen()
+      // PDFium draws pages many times faster than PDF.js, so wait briefly for it.
+      if (pdfiumState === 'loading') {
+        let timer
+        await Promise.race([pdfiumReady, new Promise((resolve) => { timer = setTimeout(resolve, pdfiumWaitMs) })])
+        clearTimeout(timer)
+        assertOpen()
+      }
       if (pdfiumDocument) {
         try {
           return await pdfiumDocument.renderPage(pageIndex, canvas, options)
@@ -120,6 +128,9 @@ export async function openDocumentSession(input, {
     async getTextContent(pageIndex, options) {
       assertOpen()
       return pdfJsAdapter.getTextContent(pdfJsDocument, pageIndex, options)
+    },
+    getPageFonts(pageIndex) {
+      return pdfJsAdapter.getPageFonts?.(pdfJsDocument, pageIndex) ?? []
     },
     async close() {
       if (closePromise) return closePromise

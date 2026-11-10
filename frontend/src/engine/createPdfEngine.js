@@ -63,6 +63,13 @@ export function createPdfEngine({ baseUrl, pdfJsAdapter: injectedPdfJs, pdfiumAd
       return session
     },
 
+    /** Load the renderers ahead of time so the first PDF opens quickly. */
+    async warmUp() {
+      if (disposed) return
+      const adapters = await ensureAdapters().catch(() => null)
+      await adapters?.pdfium?.initialize?.().catch(() => undefined)
+    },
+
     get activeDocumentCount() {
       return sessions.size
     },

@@ -3,10 +3,11 @@
 // fontkit) once it has loaded, so the preview wraps exactly like the PDF.
 
 import {
-  createStandardMeasurer, cssFontFamily, familyMetrics, isStandardFamily, standardFontFor, textObjectLayout,
+  createStandardMeasurer, cssFontFamily, familyMetrics, isStandardFamily, standardFontFor, textObjectLayout, textWeight,
 } from '../../engine/page-objects/textLayout.js'
 import { openFontProgram } from '../../engine/font-engine/fontEmbedder.js'
 import { normalizeFontKey } from '../../engine/font-engine/pdfFontLoader.js'
+import { styleDistance } from '../../engine/font-engine/fallbackFonts.js'
 
 let fontProvider = null
 const localFonts = new Map()
@@ -22,11 +23,8 @@ export function subscribeFontLoads(listener) {
   return () => listeners.delete(listener)
 }
 
-const isBold = (style) => /bold|black|heavy|semibold|demi/i.test(style || '')
-const isItalic = (style) => /italic|oblique/i.test(style || '')
-
-function loadLocalFont(family, bold, italic) {
-  const key = `${normalizeFontKey(family)}|${bold ? 1 : 0}|${italic ? 1 : 0}`
+function loadLocalFont(family, weight, italic) {
+  const key = `${normalizeFontKey(family)}|${weight}|${italic ? 1 : 0}`
   if (localFonts.has(key)) return localFonts.get(key)
   const entry = { status: 'loading', font: null }
   localFonts.set(key, entry)
@@ -35,7 +33,7 @@ function loadLocalFont(family, bold, italic) {
       const fonts = fontProvider ? await fontProvider.listFonts() : []
       const candidates = fonts
         .filter((item) => normalizeFontKey(item.family) === normalizeFontKey(family))
-        .sort((a, b) => ((isBold(a.style) !== bold) * 2 + (isItalic(a.style) !== italic)) - ((isBold(b.style) !== bold) * 2 + (isItalic(b.style) !== italic)))
+        .sort((a, b) => styleDistance(a.style, { weight, italic }) - styleDistance(b.style, { weight, italic }))
       if (!candidates.length) throw new Error('not installed')
       entry.font = await openFontProgram(await candidates[0].load(), candidates[0].postscriptName)
       entry.status = 'ready'
@@ -47,27 +45,28 @@ function loadLocalFont(family, bold, italic) {
   return entry
 }
 
-function canvasMeasure(text, size, family, bold, italic) {
+function canvasMeasure(text, size, family, weight, italic) {
   if (!canvasContext) {
     const canvas = typeof document !== 'undefined' ? document.createElement('canvas') : null
     canvasContext = canvas?.getContext('2d') || null
   }
   if (!canvasContext) return text.length * size * 0.5
-  canvasContext.font = `${italic ? 'italic ' : ''}${bold ? '700 ' : '400 '}100px ${cssFontFamily(family)}`
+  canvasContext.font = `${italic ? 'italic ' : ''}${weight} 100px ${cssFontFamily(family)}`
   return (canvasContext.measureText(text).width / 100) * size
 }
 
 /** { measure(text) -> points, metrics } for a text object's font and size. */
 export function measurerFor(object) {
   const family = object.fontFamily || 'Helvetica'
-  const bold = Boolean(object.bold)
+  const weight = textWeight(object)
+  const bold = weight >= 600
   const italic = Boolean(object.italic)
   const size = object.fontSize || 12
   if (isStandardFamily(family) || object.fontSource !== 'local') {
     const measure = createStandardMeasurer(standardFontFor(family, bold, italic))
     return { measure: (text) => measure(text, size), metrics: familyMetrics(family), ready: true }
   }
-  const entry = loadLocalFont(family, bold, italic)
+  const entry = loadLocalFont(family, weight, italic)
   if (entry.status === 'ready' && entry.font) {
     const font = entry.font
     return {
@@ -76,7 +75,7 @@ export function measurerFor(object) {
       ready: true,
     }
   }
-  return { measure: (text) => canvasMeasure(text, size, family, bold, italic), metrics: familyMetrics(family), ready: entry.status !== 'loading' }
+  return { measure: (text) => canvasMeasure(text, size, family, weight, italic), metrics: familyMetrics(family), ready: entry.status !== 'loading' }
 }
 
 export function layoutTextObject(object) {
@@ -93,7 +92,7 @@ export function fitTextObject(object) {
 export function textCss(object, scale = 1) {
   return {
     fontFamily: cssFontFamily(object.fontFamily),
-    fontWeight: object.bold ? 700 : 400,
+    fontWeight: textWeight(object),
     fontStyle: object.italic ? 'italic' : 'normal',
     fontSize: `${(object.fontSize || 12) * scale}px`,
     lineHeight: `${(object.fontSize || 12) * (object.lineHeight || 1.25) * scale}px`,

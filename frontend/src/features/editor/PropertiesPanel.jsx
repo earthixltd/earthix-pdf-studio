@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   FaAlignCenter, FaAlignLeft, FaAlignRight, FaArrowDown, FaChevronDown, FaChevronUp, FaArrowUp, FaBold, FaClone, FaDesktop, FaEraser, FaExchangeAlt,
-  FaFilePdf, FaFont, FaHighlighter, FaICursor, FaImage, FaInfoCircle, FaItalic, FaKeyboard, FaLock, FaLongArrowAltRight,
-  FaPenNib, FaRedoAlt, FaRegCircle, FaRegSquare, FaShapes, FaShieldAlt, FaSignature, FaSlash, FaStickyNote,
+  FaFont, FaHighlighter, FaICursor, FaImage, FaInfoCircle, FaItalic, FaKeyboard, FaLock, FaLongArrowAltRight,
+  FaPenNib, FaRedoAlt, FaRegCircle, FaRegSquare, FaShapes, FaSlash, FaStickyNote,
   FaStrikethrough, FaTimes, FaTrashAlt, FaUnderline, FaUndoAlt,
 } from 'react-icons/fa'
-import { STANDARD_FAMILIES } from '../../engine/page-objects/textLayout.js'
+import { STANDARD_FAMILIES, isStandardFamily, textWeight } from '../../engine/page-objects/textLayout.js'
 import { COLOR_SWATCHES, HIGHLIGHT_COLORS, NOTE_COLORS, isLineShape, objectLabel } from './objectFactory.js'
-import { FontInspectorPanel } from '../text-editor/FontInspectorPanel.jsx'
 
 const TYPE_ICONS = { text: FaFont, image: FaImage, shape: FaShapes, ink: FaPenNib, highlight: FaHighlighter, note: FaStickyNote }
 const round = (value, digits = 1) => (Number.isFinite(value) ? Math.round(value * 10 ** digits) / 10 ** digits : 0)
@@ -156,6 +155,30 @@ function FontSelect({ value, source, localFonts, onChange, extraFamily, disabled
   )
 }
 
+const WEIGHT_NAMES = { 100: 'Thin', 200: 'Extra Light', 300: 'Light', 400: 'Regular', 500: 'Medium', 600: 'Semibold', 700: 'Bold', 800: 'Extra Bold', 900: 'Black' }
+
+/** Only the weights this font really has on this computer, plus the current one. */
+function WeightSelect({ family, value, localFonts, onChange, disabled }) {
+  const standard = isStandardFamily(family)
+  const options = [...new Set([...(standard ? [400, 700] : localFonts.weightsFor(family)), value])].sort((a, b) => a - b)
+  const canLoad = !standard && !localFonts.families.length && localFonts.supported
+  return (
+    <div className="field">
+      <label>Weight</label>
+      <select
+        className="select" value={value} aria-label="Font weight" disabled={disabled || (options.length < 2 && !canLoad)}
+        onChange={(event) => {
+          if (event.target.value === 'load') { localFonts.onLoad(); return }
+          onChange(Number(event.target.value))
+        }}
+      >
+        {options.map((weight) => <option key={weight} value={weight}>{WEIGHT_NAMES[weight] || weight}</option>)}
+        {canLoad && <option value="load">More from this computer…</option>}
+      </select>
+    </div>
+  )
+}
+
 function ToggleRow({ items }) {
   return (
     <div className="segmented">
@@ -180,6 +203,7 @@ function TextProperties({ object, update, preview, localFonts }) {
           <label>Font</label>
           <FontSelect value={object.fontFamily} source={object.fontSource} localFonts={localFonts} onChange={(patch) => update(patch, 'Change font')} />
         </div>
+        <WeightSelect family={object.fontFamily} value={textWeight(object)} localFonts={localFonts} onChange={(weight) => update({ weight, bold: weight >= 600 }, 'Change weight')} />
         <div className="field-row">
           <NumberField label="Size" value={object.fontSize} min={4} max={300} step={0.5} suffix="pt" onCommit={(fontSize) => update({ fontSize }, 'Change text size')} />
           <div className="field">
@@ -191,7 +215,7 @@ function TextProperties({ object, update, preview, localFonts }) {
         </div>
         <div className="field-row">
           <ToggleRow items={[
-            { title: 'Bold', icon: FaBold, active: object.bold, onClick: () => update({ bold: !object.bold }, 'Bold') },
+            { title: 'Bold', icon: FaBold, active: textWeight(object) >= 600, onClick: () => update({ bold: textWeight(object) < 600, weight: textWeight(object) < 600 ? 700 : 400 }, 'Bold') },
             { title: 'Italic', icon: FaItalic, active: object.italic, onClick: () => update({ italic: !object.italic }, 'Italic') },
             { title: 'Underline', icon: FaUnderline, active: object.underline, onClick: () => update({ underline: !object.underline }, 'Underline') },
             { title: 'Strikethrough', icon: FaStrikethrough, active: object.strike, onClick: () => update({ strike: !object.strike }, 'Strikethrough') },
@@ -362,11 +386,10 @@ function CommitTextarea({ value, onCommit, placeholder, autoFocus }) {
 // Existing PDF text and images
 // ---------------------------------------------------------------------------
 
-function BlockProperties({ block, busy, onStyle, localFonts, fonts, editorDraft, editing }) {
+function BlockProperties({ block, busy, onStyle, localFonts, editing }) {
   const family = block.fontMetadata?.fontFamily || block.fontResource || 'Original font'
   const bold = (block.fontWeight || 400) >= 600
   const italic = block.fontStyle === 'italic'
-  const run = block.firstRun || null
   return (
     <>
       <div className="prop-section">
@@ -382,6 +405,7 @@ function BlockProperties({ block, busy, onStyle, localFonts, fonts, editorDraft,
           <label>Font</label>
           <FontSelect value={family} source="original" extraFamily={family} localFonts={localFonts} disabled={busy} onChange={(patch) => onStyle(block, patch)} />
         </div>
+        <WeightSelect family={family} value={block.fontWeight || 400} localFonts={localFonts} disabled={busy} onChange={(weight) => onStyle(block, { weight })} />
         <div className="field-row">
           <NumberField label="Size" value={block.fontSizeUser} min={2} max={300} step={0.5} suffix="pt" disabled={busy} onCommit={(fontSize) => onStyle(block, { fontSize })} />
           <div className="field">
@@ -394,12 +418,6 @@ function BlockProperties({ block, busy, onStyle, localFonts, fonts, editorDraft,
         </div>
         <div className="field"><label>Colour</label><ColorPicker value={block.fillColor} onChange={(color) => { if (!busy && color) onStyle(block, { color }) }} /></div>
         {block.twinKeys?.length > 0 && <p className="notice"><FaInfoCircle />This text has a shadow copy — both change together.</p>}
-      </div>
-      <div className="prop-section">
-        <details className="font-details">
-          <summary>Font details</summary>
-          <div style={{ marginTop: 10 }}><FontInspectorPanel fonts={fonts} run={run} replacementText={editing ? editorDraft : ''} /></div>
-        </details>
       </div>
     </>
   )
@@ -450,7 +468,7 @@ function PageImageProperties({ image, busy, onImage }) {
 // Tool defaults and document information
 // ---------------------------------------------------------------------------
 
-function ToolSettings({ tool, settings, onSettings, localFonts, onChooseImage, onSignature }) {
+function ToolSettings({ tool, settings, onSettings, localFonts }) {
   if (tool === 'text') {
     const text = settings.text
     const set = (patch) => onSettings('text', patch)
@@ -458,10 +476,11 @@ function ToolSettings({ tool, settings, onSettings, localFonts, onChooseImage, o
       <div className="prop-section">
         <p className="prop-title">New text</p>
         <div className="field"><label>Font</label><FontSelect value={text.fontFamily} source={text.fontSource} localFonts={localFonts} onChange={set} /></div>
+        <WeightSelect family={text.fontFamily} value={textWeight(text)} localFonts={localFonts} onChange={(weight) => set({ weight, bold: weight >= 600 })} />
         <div className="field-row">
           <NumberField label="Size" value={text.fontSize} min={4} max={300} step={0.5} suffix="pt" onCommit={(fontSize) => set({ fontSize })} />
           <div className="field"><label>Style</label><ToggleRow items={[
-            { title: 'Bold', icon: FaBold, active: text.bold, onClick: () => set({ bold: !text.bold }) },
+            { title: 'Bold', icon: FaBold, active: textWeight(text) >= 600, onClick: () => set({ bold: textWeight(text) < 600, weight: textWeight(text) < 600 ? 700 : 400 }) },
             { title: 'Italic', icon: FaItalic, active: text.italic, onClick: () => set({ italic: !text.italic }) },
             { title: 'Underline', icon: FaUnderline, active: text.underline, onClick: () => set({ underline: !text.underline }) },
           ]} /></div>
@@ -520,56 +539,16 @@ function ToolSettings({ tool, settings, onSettings, localFonts, onChooseImage, o
       </div>
     )
   }
-  if (tool === 'image') {
-    return <div className="prop-section"><p className="prop-title">Image</p><button type="button" className="btn btn-primary btn-block" onClick={onChooseImage}><FaImage /> Choose a picture…</button><p className="notice" style={{ marginTop: 12 }}><FaInfoCircle />Works with JPG, PNG, WebP, GIF and SVG.</p></div>
-  }
-  if (tool === 'signature') {
-    return <div className="prop-section"><p className="prop-title">Signature</p><button type="button" className="btn btn-secondary btn-block" onClick={onSignature}><FaSignature /> Create or change signature…</button></div>
-  }
-  if (tool === 'whiteout') {
-    return <div className="prop-section"><p className="prop-title">Whiteout</p><p className="notice"><FaEraser />Drag over the area you want to hide.</p></div>
-  }
   return null
-}
-
-function DocumentInfo({ info }) {
-  return (
-    <>
-      <div className="prop-section">
-        <div className="prop-hero">
-          <span className="prop-hero-icon"><FaFilePdf /></span>
-          <div><strong>Document</strong><small>{info.pageCount ? `${info.pageCount} pages` : 'No PDF open'}</small></div>
-        </div>
-      </div>
-      <div className="prop-section">
-        <div className="kv"><span>File</span><strong title={info.fileName}>{info.fileName}</strong></div>
-        <div className="kv"><span>Size</span><strong>{info.fileSize}</strong></div>
-        <div className="kv"><span>Current page</span><strong>{info.pageCount ? info.currentPage + 1 : '—'}</strong></div>
-        <div className="kv"><span>Added items</span><strong>{info.objectCount}</strong></div>
-        <div className="kv"><span>Editable text</span><strong>{info.editableBlocks}</strong></div>
-      </div>
-      <div className="prop-section">
-        <p className="prop-title">Shortcuts</p>
-        <div className="shortcut-list">
-          <span>Select · Edit PDF · Text</span><span><kbd>V</kbd> <kbd>E</kbd> <kbd>T</kbd></span>
-          <span>Highlight · Draw · Shapes</span><span><kbd>H</kbd> <kbd>P</kbd> <kbd>R</kbd></span>
-          <span>Undo · Redo</span><span><kbd>Ctrl Z</kbd> <kbd>Ctrl Y</kbd></span>
-          <span>Duplicate · Delete</span><span><kbd>Ctrl D</kbd> <kbd>Del</kbd></span>
-          <span>Nudge (×10 with Shift)</span><span><kbd>←↑→↓</kbd></span>
-        </div>
-      </div>
-      <div className="prop-section"><p className="notice success"><FaShieldAlt />Your PDF stays on this device.</p></div>
-    </>
-  )
 }
 
 export function PropertiesPanel({
   selection, tool, toolSettings, onToolSettings, objectActions, blockBusy, onBlockStyle, onImage, imageBusy,
-  localFonts, fonts, editorDraft, documentInfo, onClose, onChooseImage, onSignature,
+  localFonts, onClose,
   collapsible = false, collapsed = false, onToggleCollapsed,
 }) {
   let title = 'Properties'
-  let subtitle = 'Document'
+  let subtitle = ''
   let body
   if (selection?.kind === 'object') {
     title = objectLabel(selection.object)
@@ -578,24 +557,24 @@ export function PropertiesPanel({
   } else if (selection?.kind === 'block') {
     title = 'Text'
     subtitle = 'Original PDF text'
-    body = <BlockProperties block={selection.block} editing={selection.editing} busy={blockBusy} onStyle={onBlockStyle} localFonts={localFonts} fonts={fonts} editorDraft={editorDraft} />
+    body = <BlockProperties block={selection.block} editing={selection.editing} busy={blockBusy} onStyle={onBlockStyle} localFonts={localFonts} />
   } else if (selection?.kind === 'image') {
     title = 'Image'
     subtitle = 'Original PDF image'
     body = <PageImageProperties image={selection.image} busy={imageBusy} onImage={onImage} />
   } else {
-    if (['text', 'highlight', 'draw', 'shape', 'note', 'image', 'signature', 'whiteout'].includes(tool)) {
+    if (['text', 'highlight', 'draw', 'shape', 'note'].includes(tool)) {
       title = 'Tool options'
       subtitle = 'Applies to new items'
-      body = <ToolSettings tool={tool} settings={toolSettings} onSettings={onToolSettings} localFonts={localFonts} onChooseImage={onChooseImage} onSignature={onSignature} />
+      body = <ToolSettings tool={tool} settings={toolSettings} onSettings={onToolSettings} localFonts={localFonts} />
     } else {
-      body = <DocumentInfo info={documentInfo} />
+      body = <p className="empty-note">Select something on the page to see its options.</p>
     }
   }
   return (
     <aside className={`side-panel right ${collapsible && collapsed ? 'collapsed' : ''}`} aria-label="Properties">
       <div className="panel-head" onClick={collapsible ? (event) => { if (!event.target.closest('button')) onToggleCollapsed?.() } : undefined}>
-        <div><h2>{title}</h2><small>{collapsible && collapsed ? 'Tap to show options' : subtitle}</small></div>
+        <div><h2>{title}</h2>{(subtitle || (collapsible && collapsed)) && <small>{collapsible && collapsed ? 'Tap to show options' : subtitle}</small>}</div>
         <div style={{ display: 'flex', gap: 2 }}>
           {collapsible && (
             <button type="button" className="icon-btn sm" onClick={onToggleCollapsed} title={collapsed ? 'Show options' : 'Make smaller'} aria-label={collapsed ? 'Show options' : 'Make smaller'}>

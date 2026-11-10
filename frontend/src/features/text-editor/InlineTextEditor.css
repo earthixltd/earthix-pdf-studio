@@ -13,8 +13,8 @@
   outline-offset: 1px;
   transition: outline-color 120ms ease, background-color 120ms ease;
 }
-.earthix-text-hit:hover { outline-color: rgb(36 84 230 / 60%); background: rgb(36 84 230 / 6%); }
-.earthix-text-hit.is-selected { outline: 1px dashed rgb(36 84 230 / 80%); }
+.earthix-text-hit:hover { outline-color: rgb(49 125 144 / 60%); background: rgb(49 125 144 / 6%); }
+.earthix-text-hit.is-selected { outline: 1px dashed rgb(49 125 144 / 80%); }
 .earthix-text-hit.is-locked { cursor: not-allowed; }
 .earthix-text-hit.is-locked:hover { outline-color: rgb(196 120 30 / 55%); background: rgb(196 120 30 / 6%); }
 
@@ -26,10 +26,10 @@
   border: 0;
   transform-origin: 0 0;
   white-space: pre;
-  outline: 1.5px solid rgb(36 84 230 / 80%);
+  outline: 1.5px solid rgb(49 125 144 / 80%);
   outline-offset: 3px;
   cursor: text;
-  caret-color: #2454e6;
+  caret-color: var(--accent);
   user-select: text;
   -webkit-user-select: text;
   font-kerning: normal;
@@ -45,7 +45,7 @@
   padding: 4px 8px;
   border-radius: 6px;
   color: #fff;
-  background: #2454e6;
+  background: var(--accent);
   font-size: 10px;
   font-weight: 700;
   white-space: nowrap;

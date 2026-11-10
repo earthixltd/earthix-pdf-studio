@@ -14,10 +14,10 @@ import { writeIncrementalUpdate } from '../pdf-parser/incrementalWriter.js'
 import { deflate } from '../pdf-parser/pdfStreams.js'
 import { formatPdfNumber, latin1Bytes, name, PdfDict, PdfRef, PdfString } from '../pdf-parser/pdfSyntax.js'
 import { createEmbeddedFontEncoder, createStandardFontEncoder } from '../font-engine/fontEmbedder.js'
-import { resolveFallbackFont } from '../font-engine/fallbackFonts.js'
+import { resolveFallbackFont, styleDistance } from '../font-engine/fallbackFonts.js'
 import { normalizeFontKey } from '../font-engine/pdfFontLoader.js'
 import { boxLocalToView, multiplyMatrix, pageGeometry, transformPoint } from './pageGeometry.js'
-import { familyMetrics, isStandardFamily, standardFontFor, textObjectLayout } from './textLayout.js'
+import { familyMetrics, isStandardFamily, standardFontFor, textObjectLayout, textWeight } from './textLayout.js'
 import { arrowHeadSegments, arrowShaftEnd, ellipseSegments, rectSegments, segmentsToPdf, strokeSegments } from './shapePaths.js'
 import { buildImageXObject } from './imageCodec.js'
 
@@ -77,8 +77,6 @@ function randomTag() {
 // Fonts
 // ---------------------------------------------------------------------------
 
-const isBoldStyle = (style) => /bold|black|heavy|semibold|demi/i.test(style || '')
-const isItalicStyle = (style) => /italic|oblique/i.test(style || '')
 
 /** Chooses (and caches) the font program used for each text object. */
 export class TextFontManager {
@@ -103,14 +101,11 @@ export class TextFontManager {
     return this.register(`std:${fontName}`, createStandardFontEncoder(fontName))
   }
 
-  async local(family, bold, italic, text) {
+  async local(family, weight, italic, text) {
     const wanted = normalizeFontKey(family)
     const candidates = (await this.localFonts())
       .filter((entry) => normalizeFontKey(entry.family) === wanted)
-      .sort((a, b) => (
-        ((isBoldStyle(a.style) !== bold) * 4 + (isItalicStyle(a.style) !== italic) * 2 + (/light|thin|narrow|condensed|medium/i.test(a.style || '') ? 1 : 0)) -
-        ((isBoldStyle(b.style) !== bold) * 4 + (isItalicStyle(b.style) !== italic) * 2 + (/light|thin|narrow|condensed|medium/i.test(b.style || '') ? 1 : 0))
-      ))
+      .sort((a, b) => styleDistance(a.style, { weight, italic }) - styleDistance(b.style, { weight, italic }))
     for (const entry of candidates) {
       const key = `local:${entry.postscriptName}`
       if (this.entries.has(key)) {
@@ -132,17 +127,18 @@ export class TextFontManager {
   /** Font for one text object; `text` is everything the object draws. */
   async forText(object, text) {
     const family = object.fontFamily || 'Helvetica'
-    const bold = Boolean(object.bold)
+    const weight = textWeight(object)
+    const bold = weight >= 600
     const italic = Boolean(object.italic)
     const visible = text.replace(/\s+/g, '')
     if (object.fontSource === 'local' && !isStandardFamily(family)) {
-      const local = await this.local(family, bold, italic, visible)
+      const local = await this.local(family, weight, italic, visible)
       if (local) return local
     } else {
       const standard = this.standard(standardFontFor(family, bold, italic))
       if (standard.encoder.canEncode(visible)) return standard
     }
-    const fallback = await resolveFallbackFont({ family, bold, italic, serif: family === 'Times', fixedPitch: family === 'Courier' }, visible || 'a', this.provider)
+    const fallback = await resolveFallbackFont({ family, weight, bold, italic, serif: family === 'Times', fixedPitch: family === 'Courier' }, visible || 'a', this.provider)
     if (fallback) {
       if (object.fontSource === 'local' && fallback.match !== 'exact') {
         this.warnings.push(`Used ${fallback.label} — “${family}” is not available here.`)

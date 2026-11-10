@@ -7,6 +7,15 @@ import {
 
 const blockWithText = (inspection, text) => inspection.blocks.find((block) => block.text === text)
 const runStartX = (inspection, text) => inspection.runs.find((run) => run.originalText === text)?.startPoint.x
+const lineStartingWith = (inspection, start) => {
+  const first = inspection.blocks.find((block) => block.text.startsWith(start))
+  if (!first) return ''
+  return inspection.blocks
+    .filter((block) => block.pageIndex === first.pageIndex && Math.abs(block.startPoint.y - first.startPoint.y) < 0.5 && block.startPoint.x >= first.startPoint.x)
+    .sort((a, b) => a.startPoint.x - b.startPoint.x)
+    .map((block) => block.text)
+    .join('')
+}
 
 test('groups pdf-lib text into editable blocks with geometry, size and colour', async () => {
   const bytes = await createStandardFontPdf([{ y: 700, size: 12, parts: [{ text: 'Invoice', color: [0.2, 0.4, 0.6] }, { text: 'Number', bold: true }] }])
@@ -123,7 +132,7 @@ test('uses the standard PDF font family when a non-embedded font lacks the typed
 
 const arialPath = findSystemFont(['arial.ttf', 'Arial.ttf'])
 
-test('subset font: missing characters are drawn with the same installed font', { skip: !arialPath && 'Arial is not installed' }, async () => {
+test('subset font: the same installed font redraws the line, a different font only fills the gaps', { skip: !arialPath && 'Arial is not installed' }, async () => {
   const bytes = await createSubsetFontPdf(arialPath, 'Hello')
   const before = await inspectNativePdfText(bytes)
   const block = blockWithText(before, 'Hello')
@@ -134,7 +143,8 @@ test('subset font: missing characters are drawn with the same installed font', {
   const standardResult = await replaceNativeTextBlock(bytes, block, 'Hexagon')
   assert.equal(standardResult.fontPlan.match, 'standard')
   assert.equal(standardResult.fontPlan.label, 'Helvetica')
-  assert.ok(blockWithText(standardResult.inspection, 'Hexagon'))
+  assert.deepEqual(standardResult.fontPlan.letters, ['x', 'g', 'n'], 'a and o are in the subset')
+  assert.match(lineStartingWith(standardResult.inspection, 'He'), /^Hexagon/)
   const provider = createFileFontProvider([arialPath])
   const tailBefore = runStartX(before, 'Tail')
   const result = await replaceNativeTextBlock(bytes, block, 'Hexagon', { fontProvider: provider })

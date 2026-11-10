@@ -2,17 +2,15 @@
 
 ## Brand
 
-- Primary brand: Earthix violet `#6335df`
-- Dark brand: `#5128bd`
-- Neutral system: cool slate neutrals from `#f8f9fc` to `#1b2435`
+- Primary brand: Earthix teal `#317d90` (buttons use `#368497` to `#2d7587`)
+- Hover: `#2a6c7e`
+- Light theme only, no shadows; separate areas with `#e4e9ee` borders
 - Surface: `#ffffff`
-- Workspace: `#f3f5fa`
+- Workspace: `#f6f8fa`
 
 ## Typography
 
-- UI/body: DM Sans
-- Display/editorial headings: DM Serif Display
-- Brand and dense UI labels: Manrope
+- UI, body and headings: Inter
 - All fonts have local system fallbacks.
 
 ## Breakpoints

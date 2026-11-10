@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import "./components/ui/ui.css";
 
 /*
  * Earthix Design System
@@ -7,16 +6,16 @@
  * Keep the breakpoint system limited to md and lg.
  */
 @theme {
-  --color-brand-50: #eef3ff;
-  --color-brand-100: #e0e8fe;
-  --color-brand-200: #c2d2fd;
-  --color-brand-300: #94b1fb;
-  --color-brand-400: #5f87f5;
-  --color-brand-500: #3a66ee;
-  --color-brand-600: #2454e6;
-  --color-brand-700: #1d45c4;
-  --color-brand-800: #1b3a9c;
-  --color-brand-900: #1a327a;
+  --color-brand-50: #eef7f9;
+  --color-brand-100: #dceef2;
+  --color-brand-200: #badde5;
+  --color-brand-300: #8cc5d2;
+  --color-brand-400: #5ba8ba;
+  --color-brand-500: #3d92a6;
+  --color-brand-600: #317d90;
+  --color-brand-700: #2a6c7e;
+  --color-brand-800: #235a69;
+  --color-brand-900: #1d4a57;
 
   --color-neutral-0: #ffffff;
   --color-neutral-50: #f8f9fc;
@@ -69,7 +68,7 @@
   --color-workspace: #f3f5fa;
   --color-border: #e6e9f1;
   --color-border-strong: #d9deea;
-  --color-focus-ring: #5f87f5;
+  --color-focus-ring: #5ba8ba;
 
   /* Shared spacing scale: 1 unit = 4px */
   --space-1: 0.25rem;

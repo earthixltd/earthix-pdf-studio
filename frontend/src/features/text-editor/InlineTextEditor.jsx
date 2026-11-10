@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { FaSpinner } from 'react-icons/fa'
 import { blockViewGeometry } from './blockGeometry.js'
+import { peekPreviewFont, previewFontFamily } from '../../engine/font-engine/previewFonts.js'
 import './InlineTextEditor.css'
 
 function sampleBackground(canvas, rect) {
@@ -75,11 +76,19 @@ const readText = (element) => (element?.textContent || '').replace(/\u00a0/g, ' 
  * glyphs are masked with the sampled page background while typing so only one
  * copy is ever visible; the PDF itself is rewritten when the edit is committed.
  */
-export function InlineTextEditor({ block, viewport, canvas, clickPoint, busy = false, onCommit, onCancel, onDraftChange }) {
+export function InlineTextEditor({ session, block, viewport, canvas, clickPoint, busy = false, onCommit, onCancel, onDraftChange }) {
   const elementRef = useRef(null)
   const finishedRef = useRef(false)
   const geometry = useMemo(() => blockViewGeometry(block, viewport), [block, viewport])
   const background = useMemo(() => sampleBackground(canvas, geometry.rect), [canvas, geometry])
+  const [previewFamily, setPreviewFamily] = useState(() => peekPreviewFont(block))
+  const [baselineFix, setBaselineFix] = useState(0)
+
+  useEffect(() => {
+    let active = true
+    void previewFontFamily(session, block).then((family) => { if (active) setPreviewFamily(family) }).catch(() => undefined)
+    return () => { active = false }
+  }, [session, block])
 
   useLayoutEffect(() => {
     const element = elementRef.current
@@ -93,6 +102,17 @@ export function InlineTextEditor({ block, viewport, canvas, clickPoint, busy = f
   useEffect(() => {
     if (!busy) finishedRef.current = false
   }, [busy])
+
+  // Every font sits differently in its line box; put its baseline exactly on the PDF's.
+  useLayoutEffect(() => {
+    const element = elementRef.current
+    if (!element) return
+    const marker = document.createElement('span')
+    marker.style.cssText = 'display:inline-block;width:0;height:0'
+    element.appendChild(marker)
+    setBaselineFix(geometry.ascentPx - (marker.offsetTop + marker.offsetHeight))
+    marker.remove()
+  }, [geometry, previewFamily])
 
   const finish = (commit) => {
     if (finishedRef.current || busy) return
@@ -133,14 +153,15 @@ export function InlineTextEditor({ block, viewport, canvas, clickPoint, busy = f
   const style = {
     left: `${geometry.origin.x}px`,
     top: `${geometry.origin.y}px`,
-    transform: `rotate(${geometry.angle}deg) translateY(${-geometry.ascentPx}px)${geometry.horizontalScale !== 1 ? ` scaleX(${geometry.horizontalScale})` : ''}`,
+    transform: `rotate(${geometry.angle}deg) translateY(${baselineFix - geometry.ascentPx}px)${geometry.horizontalScale !== 1 ? ` scaleX(${geometry.horizontalScale})` : ''}`,
     height: `${geometry.heightPx}px`,
     lineHeight: `${geometry.heightPx}px`,
     minWidth: `${geometry.widthPx}px`,
     fontSize: `${geometry.fontPx}px`,
-    fontFamily: block.cssFontStack,
-    fontWeight: block.fontWeight,
-    fontStyle: block.fontStyle,
+    // The PDF's own font already carries its weight and slant, so the browser must not add more.
+    fontFamily: previewFamily ? `"${previewFamily}", ${block.cssFontStack}` : block.cssFontStack,
+    fontWeight: previewFamily ? (block.twinKeys?.length ? 700 : 400) : block.fontWeight,
+    fontStyle: previewFamily ? 'normal' : block.fontStyle,
     letterSpacing: geometry.letterSpacingPx ? `${geometry.letterSpacingPx}px` : undefined,
     color: block.fillColor || '#000000',
     backgroundColor: background,

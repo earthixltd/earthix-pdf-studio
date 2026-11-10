@@ -6,6 +6,7 @@ import { calculatePdfZoom, clampPdfZoom } from './zoomMath.js'
 import { applySearchHighlights } from './applySearchHighlights.js'
 import { InlineTextEditor } from '../text-editor/InlineTextEditor.jsx'
 import { viewportRect } from '../text-editor/blockGeometry.js'
+import { warmPreviewFonts } from '../../engine/font-engine/previewFonts.js'
 import './pdf-viewer.css'
 
 const MAX_DEVICE_PIXEL_RATIO = 2
@@ -23,7 +24,6 @@ export function PdfPageViewer({
   zoom = 1,
   searchQuery = '',
   searchItemIndexes = [],
-  engineStatus = 'loading',
   editMode = false,
   textBlocks = [],
   activeBlock = null,
@@ -41,6 +41,8 @@ export function PdfPageViewer({
   textLayerActive = true,
   selectedBlockKey = null,
   onPinchZoom,
+  scrollRestoreRef = null,
+  onScrollChange,
 }) {
   const viewportRef = useRef(null)
   const pageHostRef = useRef(null)
@@ -59,6 +61,12 @@ export function PdfPageViewer({
   searchQueryRef.current = searchQuery
   searchItemIndexesRef.current = searchItemIndexes
   onPageRenderedRef.current = onPageRendered
+  // Latest callbacks, kept out of the render effect so that unrelated app
+  // updates (selecting an item, typing) never redraw the page.
+  const callbacksRef = useRef({})
+  callbacksRef.current = { onZoomChange, onTextSelected, onRenderError }
+  const scrollAreaRef = useRef(null)
+  const lastPageRef = useRef(null)
 
   const measureViewport = useCallback(() => {
     const element = viewportRef.current
@@ -129,16 +137,34 @@ export function PdfPageViewer({
         textLayerElement.setAttribute('role', 'group')
         textLayerElement.setAttribute('aria-label', `Selectable text on page ${pageIndex + 1}`)
 
+        // Show the page right away; the selectable text layer follows.
+        pageHostRef.current.style.width = `${viewport.width}px`
+        pageHostRef.current.style.height = `${viewport.height}px`
+        pageHostRef.current.replaceChildren(canvas, textLayerElement)
+        canvasRef.current = canvas
+        setPageScale(scale)
+        setPageViewport(viewport)
+        setRenderedPageIndex(pageIndex)
+        callbacksRef.current.onZoomChange?.(scale)
+        setRenderState('ready')
+        onPageRenderedRef.current?.(pageIndex)
+
+        const area = scrollAreaRef.current
+        if (area && scrollRestoreRef?.current) {
+          const saved = scrollRestoreRef.current
+          scrollRestoreRef.current = null
+          area.scrollTop = saved.top || 0
+          area.scrollLeft = saved.left || 0
+        } else if (area && lastPageRef.current !== null && lastPageRef.current !== pageIndex) {
+          area.scrollTop = 0
+        }
+        lastPageRef.current = pageIndex
+
         const textContent = await pageProxy.getTextContent({
           includeMarkedContent: false,
           disableNormalization: true,
         })
         if (cancelled || !pageHostRef.current) return
-
-        pageHostRef.current.style.width = `${viewport.width}px`
-        pageHostRef.current.style.height = `${viewport.height}px`
-        pageHostRef.current.replaceChildren(canvas, textLayerElement)
-        canvasRef.current = canvas
 
         textLayer = new TextLayer({
           textContentSource: textContent,
@@ -153,22 +179,15 @@ export function PdfPageViewer({
         setTextMatchCount(matches)
         selectionHandler = () => {
           const selectedText = globalThis.getSelection?.()?.toString()?.trim() || ''
-          onTextSelected?.(selectedText)
+          callbacksRef.current.onTextSelected?.(selectedText)
         }
         textLayerElement.addEventListener('mouseup', selectionHandler)
-
-        setPageScale(scale)
-        setPageViewport(viewport)
-        setRenderedPageIndex(pageIndex)
-        onZoomChange?.(scale)
-        setRenderState('ready')
-        onPageRenderedRef.current?.(pageIndex)
       } catch (error) {
         if (cancelled) return
         const message = error?.message || 'This PDF page could not be rendered.'
         setRenderError(message)
         setRenderState('error')
-        onRenderError?.(error)
+        callbacksRef.current.onRenderError?.(error)
       }
     }
 
@@ -181,7 +200,8 @@ export function PdfPageViewer({
       textLayer?.cancel?.()
       pageProxy?.cleanup?.()
     }
-  }, [session, pageIndex, zoomMode, zoom, viewportSize.width, viewportSize.height, engineStatus, onRenderError, onTextSelected, onZoomChange])
+    // `zoom` only matters in manual mode; fit modes report it back after drawing.
+  }, [session, pageIndex, zoomMode, zoomMode === 'manual' ? zoom : null, viewportSize.width, viewportSize.height])
 
   // Pinch (touch) and Ctrl+scroll (trackpad pinch) zoom the PDF, not the whole app,
   // so toolbars and selection handles keep their size.
@@ -268,6 +288,13 @@ export function PdfPageViewer({
 
   const pageBlocks = useMemo(() => textBlocks.filter((block) => block.pageIndex === pageIndex), [textBlocks, pageIndex])
   const showEditLayer = editMode && pageViewport && renderedPageIndex === pageIndex && renderState !== 'error'
+
+  // Once the page is on screen, quietly get its real fonts ready for typing.
+  useEffect(() => {
+    if (!showEditLayer || !session || !pageBlocks.length) return undefined
+    const timer = window.setTimeout(() => { void warmPreviewFonts(session, pageBlocks) }, 150)
+    return () => window.clearTimeout(timer)
+  }, [showEditLayer, session, pageBlocks])
   const editorBlock = activeBlock && activeBlock.pageIndex === pageIndex ? activeBlock : null
 
   return (
@@ -280,7 +307,11 @@ export function PdfPageViewer({
         </div>
       )}
       {session && (
-        <div className="earthix-pdf-scroll-area">
+        <div
+          className="earthix-pdf-scroll-area"
+          ref={scrollAreaRef}
+          onScroll={(event) => onScrollChange?.({ top: event.currentTarget.scrollTop, left: event.currentTarget.scrollLeft })}
+        >
           <div
             className={`earthix-pdf-page ${editMode ? 'is-editing' : ''} ${editBusy ? 'is-busy' : ''} ${textLayerActive ? '' : 'text-layer-off'}`}
             style={pageViewport ? { width: `${pageViewport.width}px`, height: `${pageViewport.height}px` } : undefined}
@@ -307,6 +338,7 @@ export function PdfPageViewer({
                 {editorBlock && (
                   <InlineTextEditor
                     key={editorBlock.key}
+                    session={session}
                     block={editorBlock}
                     viewport={pageViewport}
                     canvas={canvasRef.current}

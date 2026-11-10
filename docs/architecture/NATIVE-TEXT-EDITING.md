@@ -34,8 +34,13 @@ original graphics state.
 * A prefix/suffix diff keeps the original glyph codes and kerning of unchanged characters; only the changed middle is re-encoded.
 * When every new character exists in the PDF font, the original font is reused (`Tj` → `TJ` with explicit glyph codes).
   Word spaces that the PDF drew by positioning (large negative `TJ` numbers) are recreated the same way.
-* When a character is missing from an embedded subset font, the whole block is drawn with the fallback font
-  (`/EFn size Tf … TJ /Original size Tf`) so the block stays visually consistent.
+* When a character is missing from an embedded subset font, the exact same installed font redraws the block if there
+  is one. Otherwise only the missing letters borrow the closest font (`/EFn size Tf … TJ /Original size Tf` around them)
+  and everything else stays in the original font. Indic text needs shaping, so it is still redrawn as a whole block.
+* While typing, the inline editor uses the PDF's own embedded font. PDF.js converts every embedded type to a browser
+  font; `engine/font-engine/previewFonts.js` rebuilds its character map so real letters reach the right glyphs.
+* Weights are numeric (100–900), read from the font name, then `/FontWeight`. Bold, italic or weight changes never swap
+  a distinctive font for an unrelated one: if that style isn't installed, the text stays as it was.
 * The rewritten operator keeps its original pen advance; text that followed it on the same line is moved by exactly the
   width difference. Movement stops at large gaps and at painted vertical rules, so other table cells and columns never
   move. If the new text overflows a cell/column or the paragraph's right margin, a warning is shown.

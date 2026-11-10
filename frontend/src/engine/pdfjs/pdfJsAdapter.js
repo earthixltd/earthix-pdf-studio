@@ -1,4 +1,4 @@
-import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
+import { getDocument, GlobalWorkerOptions, OPS, PDFWorker } from 'pdfjs-dist'
 import { PdfEngineError } from '../engineErrors.js'
 
 const DEFAULT_BASE_URL = import.meta.env?.BASE_URL || '/'
@@ -17,6 +17,13 @@ function toUint8Array(input) {
   throw new PdfEngineError('PDF data must be a File, ArrayBuffer or Uint8Array.', {
     code: 'INVALID_PDF_DATA',
   })
+}
+
+let sharedWorker = null
+function getSharedWorker() {
+  if (typeof Worker === 'undefined') return undefined
+  if (!sharedWorker) sharedWorker = new PDFWorker({ name: 'earthix-pdfjs' })
+  return sharedWorker
 }
 
 export class PdfJsAdapter {
@@ -42,6 +49,7 @@ export class PdfJsAdapter {
     const loadingTask = getDocument({
       data,
       password,
+      worker: getSharedWorker(),
       cMapUrl: this.assetUrl('pdfjs/cmaps/'),
       cMapPacked: true,
       standardFontDataUrl: this.assetUrl('pdfjs/standard_fonts/'),
@@ -51,6 +59,8 @@ export class PdfJsAdapter {
       isEvalSupported: false,
       enableXfa: false,
       stopAtErrors: false,
+      // Keeps each font's file and code map so the text editor can show the real font.
+      fontExtraProperties: true,
     })
 
     if (typeof onProgress === 'function') loadingTask.onProgress = onProgress
@@ -161,6 +171,25 @@ export class PdfJsAdapter {
     } finally {
       page.cleanup?.()
     }
+  }
+
+  /** The embedded fonts a page uses, converted by PDF.js into browser-ready files. */
+  async getPageFonts(document, pageIndex) {
+    this.assertPage(document, pageIndex)
+    const page = await document.getPage(pageIndex + 1)
+    const { fnArray, argsArray } = await page.getOperatorList()
+    const names = new Set()
+    fnArray.forEach((fn, index) => { if (fn === OPS.setFont) names.add(argsArray[index][0]) })
+    const fonts = []
+    for (const name of names) {
+      try {
+        const font = page.commonObjs.get(name)
+        if (font?.data?.length && !font.isType3Font) fonts.push(font)
+      } catch {
+        // A font PDF.js could not load simply keeps the normal preview.
+      }
+    }
+    return fonts
   }
 
   async destroy(document) {

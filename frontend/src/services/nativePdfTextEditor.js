@@ -5,7 +5,7 @@
 // Font, size, colour, rendering mode and matrices are inherited from the
 // original graphics state. When the original embedded (subset) font lacks a
 // typed character, the same font installed on this computer — or the closest
-// available match — is embedded and used for that text block only.
+// available match — is embedded and used for those letters only.
 // Words that follow the edited text on the same line are moved by exactly the
 // width difference so lengthening or shortening text never overlaps.
 
@@ -76,7 +76,12 @@ async function analyzeOnce(bytes, recoveredGlyphs) {
   const index = await PdfDocumentIndex.open(bytes)
   const pages = index.getPages()
   const context = { fontCache: new Map(), streams: new Map(), runs: [], warnings: [], activeForms: new Set(), recoveredGlyphs }
+  let lastYield = Date.now()
   for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+    if (Date.now() - lastYield > 12) {
+      await new Promise((resolve) => { setTimeout(resolve, 0) })
+      lastYield = Date.now()
+    }
     try {
       await interpretPageText(index, pages[pageIndex], pageIndex, context)
     } catch (error) {
@@ -180,7 +185,7 @@ function decorateBlock(block, context) {
   const font = context.fontCache.get(block.fontKey)
   block.fontMetadata = run?.fontMetadata || null
   block.cssFontStack = font?.cssFontStack || 'sans-serif'
-  block.fontWeight = font?.bold ? 700 : 400
+  block.fontWeight = font?.weight ?? (font?.bold ? 700 : 400)
   block.fontStyle = font?.italic ? 'italic' : 'normal'
   block.ascentUser = ((font?.ascent ?? 800) / 1000) * block.fontSizeUser
   block.descentUser = ((font?.descent ?? -200) / 1000) * block.fontSizeUser
@@ -283,6 +288,39 @@ function showPrefix(run) {
   return ''
 }
 
+/**
+ * Show elements that use the original font and a borrowed one: the font is
+ * switched only around the borrowed letters and always restored afterwards.
+ */
+function mixedFontOperators(elements, target, originalCodeBytes, fallbackCodeBytes, fallbackResourceName) {
+  const chunks = []
+  let current = { font: null, items: [] }
+  for (const element of elements) {
+    if (element.code !== undefined) {
+      if (current.font && current.font !== element.font) {
+        chunks.push(current)
+        current = { font: element.font, items: [] }
+      }
+      current.font = element.font
+    }
+    current.items.push(element)
+  }
+  chunks.push(current)
+  const size = formatPdfNumber(target.fontSize)
+  const parts = []
+  let active = 'original'
+  for (const chunk of chunks) {
+    const font = chunk.font || active
+    if (font !== active) {
+      parts.push(`/${font === 'fallback' ? fallbackResourceName : target.fontResource} ${size} Tf`)
+      active = font
+    }
+    parts.push(showOperators(chunk.items, font === 'fallback' ? fallbackCodeBytes : originalCodeBytes, target.textRise))
+  }
+  if (active !== 'original') parts.push(`/${target.fontResource} ${size} Tf`)
+  return parts.join(' ')
+}
+
 const originalElements = (glyphs) => glyphs.map((glyph) => (glyph.code !== undefined ? { code: glyph.code } : { adjust: glyph.adjust }))
 
 function textSpaceUnitsToAdjust(units, run) {
@@ -330,10 +368,10 @@ function computeDiff(oldChars, newText) {
  * Plan the content-stream rewrite for one block. Returns the stream edits, the
  * along-line width change (delta, user space) and the old/new extent.
  */
-function planBlockRewrite({ block, blockRuns, font, newText, fallback, fallbackResourceName }) {
+function planBlockRewrite({ block, blockRuns, font, newText, fallback, fallbackResourceName, wholeBlock }) {
   const chars = block.chars
   let { prefix, suffix, middle } = computeDiff(chars, newText)
-  if (fallback) { prefix = 0; suffix = 0; middle = newText }
+  if (fallback && wholeBlock) { prefix = 0; suffix = 0; middle = newText }
   const lastRun = blockRuns.length - 1
 
   let firstRun
@@ -378,8 +416,8 @@ function planBlockRewrite({ block, blockRuns, font, newText, fallback, fallbackR
 
   // Middle (new) text.
   const spaceAdjust = averageVirtualSpace(blockRuns)
-  if (fallback) {
-    for (const glyph of fallback.encoder.encode(middle)) {
+  const pushFallback = (text) => {
+    for (const glyph of fallback.encoder.encode(text)) {
       if (glyph.xOffset) elements.push({ adjust: -glyph.xOffset })
       elements.push({ code: glyph.code, font: 'fallback', rise: glyph.yOffset ? (glyph.yOffset / 1000) * target.fontSize : 0 })
       if (glyph.xOffset) elements.push({ adjust: glyph.xOffset })
@@ -394,20 +432,33 @@ function planBlockRewrite({ block, blockRuns, font, newText, fallback, fallbackR
         advance += adjustToTextSpace(extra, target)
       }
     }
+  }
+  if (fallback && wholeBlock) {
+    pushFallback(middle)
   } else {
+    // Everything the original font can draw stays in it; only missing letters borrow a font.
+    let borrowed = ''
+    const flushBorrowed = () => {
+      if (borrowed) pushFallback(borrowed)
+      borrowed = ''
+    }
     for (const character of middle) {
       const isWhitespace = /\s/.test(character)
       const code = font.encodeCharacter(isWhitespace ? ' ' : character)
       if (code === null || code === undefined) {
+        if (!isWhitespace && fallback) { borrowed += character; continue }
         if (!isWhitespace) throw new Error(`The font cannot draw “${character}”.`)
+        flushBorrowed()
         elements.push({ adjust: spaceAdjust })
         advance += adjustToTextSpace(spaceAdjust, target)
         continue
       }
+      flushBorrowed()
       elements.push({ code, font: 'original' })
       const isSpace = font.codeBytes === 1 && code === 32
       advance += (font.widthOf(code) * target.fontSize + target.characterSpacing + (isSpace ? target.wordSpacing : 0)) * horizontal
     }
+    flushBorrowed()
   }
 
   // Suffix.
@@ -429,8 +480,7 @@ function planBlockRewrite({ block, blockRuns, font, newText, fallback, fallbackR
 
   let operatorText
   if (fallback) {
-    const glyphElements = finalElements.map((element) => (element.code !== undefined ? { code: element.code, rise: element.rise } : element))
-    operatorText = `${showPrefix(target)}/${fallbackResourceName} ${formatPdfNumber(target.fontSize)} Tf ${showOperators(glyphElements, fallback.encoder.codeBytes, target.textRise)} /${target.fontResource} ${formatPdfNumber(target.fontSize)} Tf`
+    operatorText = `${showPrefix(target)}${mixedFontOperators(finalElements, target, font.codeBytes, fallback.encoder.codeBytes, fallbackResourceName)}`
   } else {
     operatorText = `${showPrefix(target)}[${elementsToTJ(finalElements, font.codeBytes)}] TJ`
   }
@@ -693,7 +743,9 @@ function lineTextFrom(analysis, pageIndex, origin, block) {
       candidate.pageIndex === pageIndex &&
       Math.abs(candidate.angle - block.angle) <= 1 &&
       Math.abs(dot(candidate.startPoint, block.normal) - baseline) <= Math.max(0.5, 0.3 * size) &&
-      dot(candidate.startPoint, block.direction) >= start - 0.3 * size
+      dot(candidate.startPoint, block.direction) >= start - 0.3 * size &&
+      // A small footnote number just before the line is not part of it.
+      dot(candidate.endPoint, block.direction) > start + Math.min(1, 0.25 * size)
     ))
     .sort((a, b) => dot(a.startPoint, block.direction) - dot(b.startPoint, block.direction))
     .map((candidate) => candidate.text)
@@ -716,6 +768,7 @@ function fontRequestFor(font) {
   return {
     postscriptName: font.postscriptName,
     family: font.family,
+    weight: font.weight,
     bold: font.bold,
     italic: font.italic,
     serif: font.serif,
@@ -753,10 +806,15 @@ async function applyBlockEdit(bytes, analysis, block, newText, options) {
   const missing = [...new Set([...middle].filter((character) => !/\s/.test(character) && font.encodeCharacter(character) === null))]
   let fallback = null
   // Indic text needs shaping (conjuncts, matras), so the whole block is redrawn
-  // with an installed font that has the script's shaping rules.
+  // with an installed font that has the script's shaping rules. Everything else
+  // keeps its own font and borrows one only for the letters it doesn't have.
   const needsShaping = Boolean(block.complexScript) || INDIC_SCRIPT.test(newText)
+  let wholeBlock = needsShaping
   if (missing.length || needsShaping) {
     fallback = await resolveFallbackFont(fontRequestFor(font), newText, options.fontProvider)
+    // The very same font on this computer looks identical, so the line stays in one piece.
+    if (fallback?.match === 'exact') wholeBlock = true
+    if (!wholeBlock) fallback = await resolveFallbackFont(fontRequestFor(font), missing.join(''), options.fontProvider)
     if (fallback && needsShaping && fallback.encoder.kind !== 'embedded') fallback = null
     if (!fallback) {
       throw new Error(needsShaping
@@ -789,7 +847,7 @@ async function applyBlockEdit(bytes, analysis, block, newText, options) {
     }
     let plan
     try {
-      plan = planBlockRewrite({ block: target, blockRuns: targetRuns, font: targetFont, newText, fallback, fallbackResourceName: resourceName })
+      plan = planBlockRewrite({ block: target, blockRuns: targetRuns, font: targetFont, newText, fallback, fallbackResourceName: resourceName, wholeBlock })
     } catch (error) {
       if (target === block) throw error
       continue
@@ -829,7 +887,9 @@ async function applyBlockEdit(bytes, analysis, block, newText, options) {
     run: firstRun,
     originalText: block.text,
     replacementText: newText,
-    fontPlan: fallback ? { kind: 'fallback', match: fallback.match, label: fallback.label } : { kind: 'original', label: font.family },
+    fontPlan: fallback
+      ? { kind: 'fallback', match: fallback.match, label: fallback.label, letters: wholeBlock ? null : missing }
+      : { kind: 'original', label: font.family },
     warnings,
     inspection: toPublicInspection(verification, nextBytes),
   }
@@ -852,9 +912,9 @@ async function resolveStyleFont(request, text, fontProvider) {
   const visible = text.replace(/\s+/g, '') || 'a'
   if (request.source === 'standard' || isStandardFamily(request.family)) {
     const encoder = createStandardFontEncoder(standardFontFor(isStandardFamily(request.family) ? request.family : 'Helvetica', request.bold, request.italic))
-    if (encoder.canEncode(visible)) return { encoder, match: 'exact', label: encoder.label }
+    if (encoder.canEncode(visible)) return { encoder, match: 'exact', label: encoder.label, related: true }
   }
-  return resolveFallbackFont({ postscriptName: '', family: request.family, bold: request.bold, italic: request.italic, serif: request.serif, fixedPitch: request.fixedPitch }, visible, fontProvider)
+  return resolveFallbackFont({ postscriptName: '', family: request.family, weight: request.weight, bold: request.bold, italic: request.italic, serif: request.serif, fixedPitch: request.fixedPitch }, visible, fontProvider)
 }
 
 /** Rewrite a whole block in one operator with a new font/size/colour. */
@@ -925,7 +985,7 @@ function planRestyle({ block, blockRuns, font, encoder, resourceName, newFontSiz
 
 /**
  * Change the look of an existing text block: style = { fontSize (points as
- * displayed), color ('#RRGGBB'), fontFamily, fontSource, bold, italic }.
+ * displayed), color ('#RRGGBB'), fontFamily, fontSource, weight, bold, italic }.
  * Text after it on the same line moves to fit, like a normal edit.
  */
 export async function restyleNativeTextBlock(bytes, blockReference, style = {}, options = {}) {
@@ -944,18 +1004,26 @@ export async function restyleNativeTextBlock(bytes, blockReference, style = {}, 
   const familyChanged = style.fontFamily && normalizeFontKey(style.fontFamily) !== normalizeFontKey(currentFamily)
   const boldChanged = style.bold !== undefined && Boolean(style.bold) !== Boolean(font.bold)
   const italicChanged = style.italic !== undefined && Boolean(style.italic) !== Boolean(font.italic)
+  const currentWeight = font.weight ?? (font.bold ? 700 : 400)
+  const weightChanged = Number.isFinite(style.weight) && style.weight !== currentWeight
   let fallback = null
-  if (familyChanged || boldChanged || italicChanged) {
+  if (familyChanged || boldChanged || italicChanged || weightChanged) {
+    const weight = weightChanged ? style.weight : boldChanged ? (style.bold ? 700 : 400) : currentWeight
     const request = {
       family: style.fontFamily || currentFamily || 'Helvetica',
       source: style.fontSource,
-      bold: style.bold ?? font.bold,
+      weight,
+      bold: weight >= 600,
       italic: style.italic ?? font.italic,
       serif: font.serif,
       fixedPitch: font.fixedPitch,
     }
     fallback = await resolveStyleFont(request, block.text, options.fontProvider)
     if (!fallback) throw new Error(`No installed font can draw this text in ${request.family}${request.bold ? ' bold' : ''}${request.italic ? ' italic' : ''}. Allow font access in Chrome or Edge, or pick another font.`)
+    // Bold or italic must never swap a distinctive font for an unrelated one.
+    if (!familyChanged && !fallback.related) {
+      throw new Error(`${request.family} has no such style on this computer, so it stayed the same.`)
+    }
     if (fallback.match !== 'exact') warnings.push(`Used ${fallback.label} — ${request.family}${request.bold ? ' Bold' : ''}${request.italic ? ' Italic' : ''} is not available here.`)
   }
   const scaleRatio = Math.abs(block.fontSize) ? block.fontSizeUser / Math.abs(block.fontSize) : 1
