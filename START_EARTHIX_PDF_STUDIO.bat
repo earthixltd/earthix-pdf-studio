@@ -43,9 +43,14 @@ call npm run prepare:assets
 if errorlevel 1 goto :error
 
 echo.
+echo Building the fast version of Earthix PDF Studio...
+call npm run build
+if errorlevel 1 goto :error
+
+echo.
 echo Starting Earthix PDF Studio at http://localhost:5173
 start "" http://localhost:5173
-call npm run dev
+call npm run preview --workspace @earthix/frontend -- --port 5173
 exit /b 0
 
 :error

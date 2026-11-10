@@ -126,6 +126,37 @@ function createBlock(pageIndex, line, runs) {
 }
 
 /**
+ * Design tools such as Canva draw a word several times for its effects. Exact
+ * copies are split into layers so each copy joins up into its own full line
+ * instead of tangling with the others.
+ */
+function overprintLayers(line) {
+  const seen = new Map()
+  const layerOf = new Map()
+  for (const run of [...line.runs].sort((a, b) => a.sequence - b.sequence)) {
+    const signature = `${run.fontKey}|${Math.round(run.fontSizeUser * 10)}|${run.glyphs.map((glyph) => glyph.code ?? '').join(',')}`
+    const along = runAlong(run, line.direction)
+    const tolerance = 0.06 * run.fontSizeUser
+    if (!seen.has(signature)) seen.set(signature, [])
+    const copies = seen.get(signature)
+    let entry = copies.find((item) => Math.abs(item.start - along.start) <= tolerance && Math.abs(item.end - along.end) <= tolerance)
+    if (!entry) {
+      entry = { ...along, count: 0 }
+      copies.push(entry)
+    }
+    layerOf.set(run, entry.count)
+    entry.count += 1
+  }
+  const layers = []
+  for (const run of line.runs) {
+    const layer = layerOf.get(run)
+    if (!layers[layer]) layers[layer] = []
+    layers[layer].push(run)
+  }
+  return layers
+}
+
+/**
  * Build editable text blocks for one page: consecutive runs on the same line,
  * with the same font/size/colour and only word-sized gaps between them.
  * Overprinted duplicates (shadow or fake-bold copies) are attached as twins so
@@ -136,25 +167,27 @@ export function buildTextBlocks(runs, pageIndex, rules = []) {
   const lines = groupRunsIntoLines(pageRuns)
   const blocks = []
   for (const line of lines) {
-    let current = null
-    let currentEnd = 0
     const lineBlocks = []
-    for (const run of line.runs) {
-      const along = runAlong(run, line.direction)
-      const size = run.fontSizeUser
-      const gap = current ? along.start - currentEnd : 0
-      const separated = current && hasSeparatorBetween(rules, { direction: line.direction, normal: line.normal, baseline: dot(run.startPoint, line.normal), size }, currentEnd, along.start)
-      const compatible = current && !separated && styleKey(current.at(-1)) === styleKey(run) && gap <= 1.0 * size && gap >= -0.3 * size
-      if (compatible) {
-        current.push(run)
-        currentEnd = Math.max(currentEnd, along.end)
-      } else {
-        if (current) lineBlocks.push(current)
-        current = [run]
-        currentEnd = along.end
+    for (const layer of overprintLayers(line)) {
+      let current = null
+      let currentEnd = 0
+      for (const run of layer) {
+        const along = runAlong(run, line.direction)
+        const size = run.fontSizeUser
+        const gap = current ? along.start - currentEnd : 0
+        const separated = current && hasSeparatorBetween(rules, { direction: line.direction, normal: line.normal, baseline: dot(run.startPoint, line.normal), size }, currentEnd, along.start)
+        const compatible = current && !separated && styleKey(current.at(-1)) === styleKey(run) && gap <= 1.0 * size && gap >= -0.3 * size
+        if (compatible) {
+          current.push(run)
+          currentEnd = Math.max(currentEnd, along.end)
+        } else {
+          if (current) lineBlocks.push(current)
+          current = [run]
+          currentEnd = along.end
+        }
       }
+      if (current) lineBlocks.push(current)
     }
-    if (current) lineBlocks.push(current)
     const built = lineBlocks.map((group) => createBlock(pageIndex, line, group))
     // Attach overprinted duplicates as twins of the first copy.
     const kept = []

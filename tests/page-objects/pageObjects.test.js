@@ -98,6 +98,7 @@ test('added objects are written as page content and comments, then read back as 
   assert.equal(annotations.filter((annotation) => annotation.subtype === 'Highlight').length, 1)
   const second = await textItems(bytes, 2)
   assert.equal(second.annotations.filter((annotation) => annotation.subtype === 'Text').length, 1)
+  assert.equal(second.annotations[0].titleObj.str, '', 'no default author name')
   assert.equal(second.annotations[0].contentsObj.str, 'Please check this page')
 
   const extracted = await extractPageObjects(bytes)

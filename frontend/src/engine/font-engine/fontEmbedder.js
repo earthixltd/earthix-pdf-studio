@@ -93,8 +93,9 @@ export function fontCoversText(font, text) {
  * Encoder for an embedded Type0/Identity-H font built from a TrueType/OpenType
  * program (a system font). Glyphs used by the edit are subset into the PDF.
  */
-export async function createEmbeddedFontEncoder(fontBytes, postscriptName, label) {
+export async function createEmbeddedFontEncoder(fontBytes, postscriptName, label, { baseName = null } = {}) {
   const font = await openFontProgram(fontBytes, postscriptName)
+  const embeddedName = baseName || font.postscriptName
   const subset = font.createSubset()
   const scale = 1000 / font.unitsPerEm
   const toUnicode = new Map()
@@ -103,7 +104,7 @@ export async function createEmbeddedFontEncoder(fontBytes, postscriptName, label
   return {
     kind: 'embedded',
     label: label || font.fullName || font.postscriptName,
-    postscriptName: font.postscriptName,
+    postscriptName: embeddedName,
     codeBytes: 2,
     ascent: font.ascent * scale,
     descent: font.descent * scale,
@@ -137,7 +138,7 @@ export async function createEmbeddedFontEncoder(fontBytes, postscriptName, label
     async buildObjects(allocate, reservedFontNumber) {
       const subsetBytes = await encodeSubset(subset)
       const isCFF = Boolean(subset.cff)
-      const baseFontName = `${randomSubsetTag()}+${(font.postscriptName || 'EarthixFallback').replace(/[^A-Za-z0-9_-]/g, '')}`
+      const baseFontName = `${randomSubsetTag()}+${(embeddedName || 'EarthixFallback').replace(/[^A-Za-z0-9_-]/g, '')}`
       const fontFileRef = new PdfRef(allocate(), 0)
       const descriptorRef = new PdfRef(allocate(), 0)
       const cidFontRef = new PdfRef(allocate(), 0)

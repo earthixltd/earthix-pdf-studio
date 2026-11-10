@@ -123,11 +123,11 @@ function HighlightShape({ object }) {
   )
 }
 
-function NoteShape({ object }) {
+function NoteShape({ object, noteZoom = 1 }) {
   const color = object.color || '#FDB022'
   const dark = darken(color)
   return (
-    <g transform={`translate(${object.x} ${object.y})`} className="note-icon">
+    <g transform={`translate(${object.x} ${object.y}) scale(${noteZoom})`} className="note-icon">
       <path d={NOTE_ICON} fill={color} stroke={dark} strokeWidth="1" strokeLinejoin="round" />
       <rect x="4.5" y="4.3" width="11" height="1.2" fill={dark} />
       <rect x="4.5" y="7.3" width="11" height="1.2" fill={dark} />
@@ -146,19 +146,19 @@ function ImageShape({ object }) {
   )
 }
 
-function ObjectShape({ object, hideText }) {
+function ObjectShape({ object, hideText, noteZoom }) {
   switch (object.type) {
     case 'text': return <TextShape object={object} hideText={hideText} />
     case 'image': return <ImageShape object={object} />
     case 'shape': return isLineShape(object) ? <LineShape object={object} /> : <ShapeBox object={object} />
     case 'ink': return <InkShape object={object} />
     case 'highlight': return <HighlightShape object={object} />
-    case 'note': return <NoteShape object={object} />
+    case 'note': return <NoteShape object={object} noteZoom={noteZoom} />
     default: return null
   }
 }
 
-export const ObjectView = memo(function ObjectView({ object, interactive, hideText = false, onPointerDown, onDoubleClick, title }) {
+export const ObjectView = memo(function ObjectView({ object, interactive, hideText = false, noteZoom = 1, onPointerDown, onDoubleClick, title }) {
   const opacity = object.type === 'highlight' ? 1 : (Number.isFinite(object.opacity) ? object.opacity : 1)
   return (
     <g
@@ -169,7 +169,7 @@ export const ObjectView = memo(function ObjectView({ object, interactive, hideTe
       onDoubleClick={interactive ? (event) => onDoubleClick?.(event, object) : undefined}
     >
       {title && <title>{title}</title>}
-      <ObjectShape object={object} hideText={hideText} />
+      <ObjectShape object={object} hideText={hideText} noteZoom={noteZoom} />
     </g>
   )
 })

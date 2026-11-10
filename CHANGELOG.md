@@ -30,7 +30,19 @@
 - **Every font keeps its look.** While typing, the text now shows in the PDF's own font for all embedded types (TrueType, CFF, Type 1, CID). A letter the font doesn't have borrows the closest font on its own; the rest of the line stays as it was.
 - **Weight control.** A Weight dropdown (Thin to Black) lists the weights a font really has on this computer, for PDF text, new text and added text boxes. Fallbacks now pick the nearest weight. Bold or italic on a font with no such style leaves the text unchanged instead of swapping the font.
 - Fixed large lines failing to save when a small number sat just before them.
-- New engine modules in `engine/page-objects/` (page geometry, text layout, image codecs, object writer and reader) and 19 new tests, with 8 tests for removed code dropped (146 total).
+- **Comments** save by themselves while you type. A comment stays an icon in its chosen colour, and clicking it shows the message. Exported comments carry only your words, with no author name. Empty comments add nothing to the PDF.
+- **Font library.** About 2,000 free fonts are now used automatically: a PDF's font with the same name is matched exactly, and for any other font the closest one is picked by comparing the shapes of the letters. Fonts download only when needed; only the font's name goes over the internet.
+- **Upload a font** from the Font list (.ttf or .otf). Added fonts are remembered in this browser and used whenever a PDF needs them.
+- **Free fonts in the Font list:** Abril Fatface, Antic Didone, Bebas Neue, Bodoni Moda, Cinzel, Cormorant Garamond, Josefin Sans, League Spartan, Libre Bodoni, Montserrat, Oswald, Playfair Display, Prata and Tenor Sans, for PDF text and text boxes.
+- Bold, italic or a weight a font doesn't have now uses the closest-looking font, with a short message, instead of being refused.
+- Faster: the browser's font permission popup no longer holds up an edit, slow font downloads can't stall one, and `START_EARTHIX_PDF_STUDIO.bat` now runs the built app instead of development mode.
+- Words that design tools draw several times over (Canva effects) now edit as one line, and every copy changes together.
+- **Recent files** on Home now lists every PDF opened here and survives a refresh; each entry can be reopened or removed.
+- Fixed the main button in popups being invisible until hovered, and selection handles are now teal so they show on any background.
+- Fixed Highlight and text selection jumping across the page when the pointer passed over blank space.
+- Fixed added text disappearing when you clicked elsewhere on the page.
+- Home now fills the whole window, the logo is smaller, and the sidebar's Open is now Upload.
+- New engine modules in `engine/page-objects/` (page geometry, text layout, image codecs, object writer and reader) and 19 new tests, with 8 tests for removed code dropped (165 total).
 
 ## 0.2.0 — In-place text editing that keeps the original look
 

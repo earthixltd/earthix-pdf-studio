@@ -17,7 +17,7 @@ import { createEmbeddedFontEncoder, createStandardFontEncoder } from '../font-en
 import { resolveFallbackFont, styleDistance } from '../font-engine/fallbackFonts.js'
 import { normalizeFontKey } from '../font-engine/pdfFontLoader.js'
 import { boxLocalToView, multiplyMatrix, pageGeometry, transformPoint } from './pageGeometry.js'
-import { familyMetrics, isStandardFamily, standardFontFor, textObjectLayout, textWeight } from './textLayout.js'
+import { familyMetrics, isStandardFamily, noteMessage, standardFontFor, textObjectLayout, textWeight } from './textLayout.js'
 import { arrowHeadSegments, arrowShaftEnd, ellipseSegments, rectSegments, segmentsToPdf, strokeSegments } from './shapePaths.js'
 import { buildImageXObject } from './imageCodec.js'
 
@@ -114,7 +114,7 @@ export class TextFontManager {
         continue
       }
       try {
-        const encoder = await createEmbeddedFontEncoder(await entry.load(), entry.postscriptName, entry.fullName)
+        const encoder = await createEmbeddedFontEncoder(await entry.load(text), entry.postscriptName, entry.fullName, { baseName: entry.source === 'library' ? entry.postscriptName : null })
         if (!encoder.canEncode(text)) continue
         return this.register(key, encoder)
       } catch {
@@ -248,7 +248,7 @@ function highlightRectOps(object) {
   return ops.join('\n')
 }
 
-// Speech-bubble icon for notes, drawn in a 20 x 20 box (PDF coordinates, y up).
+// Speech-bubble icon for comments, drawn in a 20 x 20 box (PDF coordinates, y up).
 function noteIconOps(color) {
   const [r, g, b] = hexToRgb(color || '#FFC83D')
   const dark = [r, g, b].map((value) => value * 0.55)
@@ -278,7 +278,7 @@ function modelObject(object, imageRefs) {
  * Write editor objects into `bytes`. Returns { bytes, warnings }.
  * options.fontProvider supplies installed fonts (Local Font Access).
  */
-export async function writePageObjects(bytes, objects, { fontProvider = null, flatten = false, author = 'Earthix PDF Studio' } = {}) {
+export async function writePageObjects(bytes, objects, { fontProvider = null, flatten = false } = {}) {
   const warnings = []
   const list = (objects || []).filter((object) => object && Number.isInteger(object.pageIndex))
   if (!list.length) return { bytes, warnings }
@@ -388,10 +388,13 @@ export async function writePageObjects(bytes, objects, { fontProvider = null, fl
     for (const object of ordered) {
       if (!ANNOTATION_TYPES.has(object.type)) continue
       if (object.type === 'highlight' && flatten) continue
+      const message = object.type === 'note' ? noteMessage(object) : null
+      if (object.type === 'note' && !message) continue
       const annotRef = new PdfRef(allocate(), 0)
       const apRef = new PdfRef(allocate(), 0)
       const color = hexToRgb(object.color || (object.type === 'note' ? '#FFC83D' : '#FFE066'))
       let annot
+      let popupRef = null
       let apDict
       let apContent
       if (object.type === 'highlight') {
@@ -444,10 +447,14 @@ export async function writePageObjects(bytes, objects, { fontProvider = null, fl
         apDict = new PdfDict([['Type', name('XObject')], ['Subtype', name('Form')], ['BBox', [0, 0, 20, 20]]])
         annot = new PdfDict([
           ['Type', name('Annot')], ['Subtype', name('Text')], ['Rect', rect], ['Name', name('Comment')],
-          ['C', color], ['F', 28], ['Open', false], ['P', pageRef], ['Contents', pdfTextString(object.text || '')],
+          ['C', color], ['F', 28], ['Open', false], ['P', pageRef], ['Contents', pdfTextString(message.text)],
         ])
+        // Viewers that honour it open the message at a size that fits the words.
+        popupRef = new PdfRef(allocate(), 0)
+        const popupRect = [rect[2] + 4, rect[3] - message.height - 24, rect[2] + 4 + message.width + 16, rect[3]]
+        annot.set('Popup', popupRef)
+        newObjects.push({ num: popupRef.num, gen: 0, value: new PdfDict([['Type', name('Annot')], ['Subtype', name('Popup')], ['Rect', popupRect], ['Parent', annotRef], ['Open', false], ['F', 28]]) })
       }
-      annot.set('T', pdfTextString(object.author || author))
       annot.set('M', now)
       annot.set('NM', pdfTextString(object.id))
       const apBytes = await deflate(latin1Bytes(apContent))
@@ -456,6 +463,7 @@ export async function writePageObjects(bytes, objects, { fontProvider = null, fl
       annot.set('AP', new PdfDict([['N', apRef]]))
       newObjects.push({ num: apRef.num, gen: 0, value: apDict, stream: apBytes }, { num: annotRef.num, gen: 0, value: annot })
       annotationRefs.push(annotRef)
+      if (popupRef) annotationRefs.push(popupRef)
     }
 
     const pageDict = cloneDict(current(page.num))

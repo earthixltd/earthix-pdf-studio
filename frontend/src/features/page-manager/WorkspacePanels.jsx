@@ -8,6 +8,7 @@ import {
   FaPlus,
   FaUndo,
   FaRedo,
+  FaTimes,
   FaTrash,
   FaUpload,
 } from "react-icons/fa";
@@ -19,6 +20,7 @@ export function HomeWorkspace({
   onMerge,
   recentFiles,
   onOpenRecent,
+  onRemoveRecent,
 }) {
   return (
     <section className="workspace-home-panel">
@@ -50,24 +52,31 @@ export function HomeWorkspace({
         <div className="workspace-section-heading">
           <div>
             <h2>Recent files</h2>
-            <p>Files opened in this browser session</p>
+            <p>Every PDF you’ve opened here</p>
           </div>
         </div>
         {recentFiles.length ? (
           <div className="workspace-recent-list">
             {recentFiles.map((item, index) => (
-              <button
-                type="button"
-                key={`${item.name}-${item.openedAt}-${index}`}
-                onClick={() => onOpenRecent(item)}
-              >
-                <FaFilePdf />
-                <span>
-                  <strong>{item.name}</strong>
-                  <small>{item.sizeLabel}</small>
-                </span>
-                <small>Open</small>
-              </button>
+              <div className="workspace-recent-row" key={item.id || `${item.name}-${index}`}>
+                <button type="button" onClick={() => onOpenRecent(item)}>
+                  <FaFilePdf />
+                  <span>
+                    <strong>{item.name}</strong>
+                    <small>{item.sizeLabel}</small>
+                  </span>
+                  <small>Open</small>
+                </button>
+                <button
+                  type="button"
+                  className="workspace-recent-remove"
+                  title="Remove from this list"
+                  aria-label={`Remove ${item.name} from this list`}
+                  onClick={() => onRemoveRecent(item)}
+                >
+                  <FaTimes />
+                </button>
+              </div>
             ))}
           </div>
         ) : (

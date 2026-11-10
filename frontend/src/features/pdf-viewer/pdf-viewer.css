@@ -4,7 +4,7 @@
 .earthix-pdf-surface { position: relative; }
 .earthix-pdf-canvas { display: block; max-width: none; background: #fff; }
 .earthix-pdf-text-layer { position: absolute; inset: 0; overflow: hidden; opacity: 1; line-height: 1; user-select: text; -webkit-user-select: text; }
-.earthix-pdf-text-layer .endOfContent { display: block; position: absolute; inset: 100% 0 0; z-index: -1; }
+.earthix-pdf-text-layer .endOfContent { display: block; position: absolute; inset: 100% 0 0; z-index: 0; cursor: default; user-select: none; }
 .earthix-pdf-text-layer ::selection { color: transparent; background: rgb(49 125 144 / 28%); }
 .earthix-pdf-text-layer .earthix-search-hit { border-radius: 2px; background: rgb(255 210 64 / 48%); }
 .earthix-viewer-status { display: flex; position: absolute; inset: 0; z-index: 5; align-items: center; justify-content: center; gap: 9px; color: var(--accent-text); background: color-mix(in srgb, var(--bg-stage, #e9edf3) 70%, transparent); font-size: 13px; font-weight: 600; pointer-events: none; opacity: 0; animation: earthix-status-in 160ms ease 280ms forwards; }

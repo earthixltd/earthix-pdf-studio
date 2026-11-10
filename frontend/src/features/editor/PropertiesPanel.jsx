@@ -136,6 +136,7 @@ function FontSelect({ value, source, localFonts, onChange, extraFamily, disabled
       onChange={(event) => {
         const raw = event.target.value
         if (raw === 'load') { localFonts.onLoad(); return }
+        if (raw === 'upload') { localFonts.onUpload(); return }
         if (raw === 'original') return
         const [kind, family] = [raw.slice(0, raw.indexOf(':')), raw.slice(raw.indexOf(':') + 1)]
         onChange({ fontFamily: family, fontSource: kind === 'local' ? 'local' : 'standard' })
@@ -145,12 +146,21 @@ function FontSelect({ value, source, localFonts, onChange, extraFamily, disabled
       <optgroup label="Standard PDF fonts">
         {STANDARD_FAMILIES.map((family) => <option key={family.id} value={`std:${family.id}`}>{family.label}</option>)}
       </optgroup>
+      {localFonts.uploaded.length > 0 && (
+        <optgroup label="Your fonts">
+          {localFonts.uploaded.map((family) => <option key={family} value={`local:${family}`}>{family}</option>)}
+        </optgroup>
+      )}
+      <optgroup label="Free fonts">
+        {localFonts.free.filter((family) => !localFonts.uploaded.includes(family)).map((family) => <option key={family} value={`local:${family}`}>{family}</option>)}
+      </optgroup>
       {localFonts.families.length > 0 && (
         <optgroup label="Fonts on this computer">
-          {localFonts.families.map((family) => <option key={family} value={`local:${family}`}>{family}</option>)}
+          {localFonts.families.filter((family) => !localFonts.uploaded.includes(family) && !localFonts.free.includes(family)).map((family) => <option key={family} value={`local:${family}`}>{family}</option>)}
         </optgroup>
       )}
       {!localFonts.families.length && localFonts.supported && <option value="load">More fonts from this computer…</option>}
+      <option value="upload">Upload a font…</option>
     </select>
   )
 }
@@ -352,7 +362,7 @@ function ObjectProperties({ object, actions, localFonts }) {
             <RangeField label="Strength" value={Math.round((object.opacity ?? 0.45) * 100)} min={15} max={90} step={1} format={(value) => `${value}%`}
               onPreview={(value) => preview({ ...object, opacity: value / 100 })} onCommit={(value) => update({ opacity: value / 100 }, 'Highlight strength')} />
           )}
-          <div className="field"><label>Comment</label><CommitTextarea value={object.comment || ''} placeholder="Add a note to this highlight…" onCommit={(comment) => update({ comment }, 'Edit comment')} /></div>
+          <div className="field"><label>Comment</label><CommitTextarea key={object.id} value={object.comment || ''} placeholder="Add a note to this highlight…" onCommit={(comment) => update({ comment }, 'Edit comment')} /></div>
           {object.text && <p className="notice"><FaInfoCircle />“{object.text.length > 120 ? `${object.text.slice(0, 120)}…` : object.text}”</p>}
         </div>
       )}
@@ -360,7 +370,7 @@ function ObjectProperties({ object, actions, localFonts }) {
       {object.type === 'note' && (
         <div className="prop-section">
           <p className="prop-title">Comment</p>
-          <div className="field"><CommitTextarea autoFocus={!object.text} value={object.text || ''} placeholder="Write your comment…" onCommit={(text) => update({ text }, 'Edit comment')} /></div>
+          <div className="field"><CommitTextarea key={object.id} autoFocus={!object.text} value={object.text || ''} placeholder="Write your comment…" onCommit={(text) => update({ text }, 'Edit comment')} /></div>
           <div className="field"><label>Colour</label><ColorPicker value={object.color} colors={NOTE_COLORS} onChange={(color) => update({ color }, 'Comment colour')} /></div>
           <p className="notice"><FaInfoCircle />Other PDF apps will show this comment too.</p>
         </div>
@@ -371,13 +381,43 @@ function ObjectProperties({ object, actions, localFonts }) {
   )
 }
 
+/** Saves by itself shortly after typing stops, and whenever it is left or closed. */
 function CommitTextarea({ value, onCommit, placeholder, autoFocus }) {
   const [local, setLocal] = useState(value)
-  useEffect(() => { setLocal(value) }, [value])
+  const savedRef = useRef(value)
+  const pendingRef = useRef(null)
+  const timerRef = useRef(null)
+  const onCommitRef = useRef(onCommit)
+  onCommitRef.current = onCommit
+
+  const flush = () => {
+    window.clearTimeout(timerRef.current)
+    const text = pendingRef.current
+    pendingRef.current = null
+    if (text === null || text === savedRef.current) return
+    savedRef.current = text
+    onCommitRef.current(text)
+  }
+  const flushRef = useRef(flush)
+  flushRef.current = flush
+
+  useEffect(() => {
+    if (value !== savedRef.current && pendingRef.current === null) {
+      savedRef.current = value
+      setLocal(value)
+    }
+  }, [value])
+  useEffect(() => () => flushRef.current(), [])
+
   return (
     <textarea className="textarea" value={local} placeholder={placeholder} autoFocus={autoFocus}
-      onChange={(event) => setLocal(event.target.value)}
-      onBlur={() => { if (local !== value) onCommit(local) }}
+      onChange={(event) => {
+        setLocal(event.target.value)
+        pendingRef.current = event.target.value
+        window.clearTimeout(timerRef.current)
+        timerRef.current = window.setTimeout(() => flushRef.current(), 350)
+      }}
+      onBlur={flush}
       onKeyDown={(event) => event.stopPropagation()} />
   )
 }

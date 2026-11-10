@@ -773,6 +773,8 @@ function fontRequestFor(font) {
     italic: font.italic,
     serif: font.serif,
     fixedPitch: font.fixedPitch,
+    // The letters this font has and their widths, for finding one that looks like it.
+    sample: [...font.getUnicodeToCode()].map(([letter, code]) => [letter, font.widthOf(code) * 1000]).filter(([, width]) => width > 0),
   }
 }
 
@@ -811,7 +813,7 @@ async function applyBlockEdit(bytes, analysis, block, newText, options) {
   const needsShaping = Boolean(block.complexScript) || INDIC_SCRIPT.test(newText)
   let wholeBlock = needsShaping
   if (missing.length || needsShaping) {
-    fallback = await resolveFallbackFont(fontRequestFor(font), newText, options.fontProvider)
+    fallback = await resolveFallbackFont(fontRequestFor(font), newText, options.fontProvider, { exactOnly: !needsShaping })
     // The very same font on this computer looks identical, so the line stays in one piece.
     if (fallback?.match === 'exact') wholeBlock = true
     if (!wholeBlock) fallback = await resolveFallbackFont(fontRequestFor(font), missing.join(''), options.fontProvider)
@@ -858,11 +860,9 @@ async function applyBlockEdit(bytes, analysis, block, newText, options) {
 
   const blockRunKeys = new Set(block.runKeys)
   const codeBytesFor = (run) => context.fontCache.get(run.fontKey)?.codeBytes || 1
-  // Runs of the edited block after the rewritten range move with the chain.
-  const chainExcluded = new Set([...excludedKeys].filter((key) => {
-    const position = block.runKeys.indexOf(key)
-    return position < 0 || position <= primary.endRun
-  }))
+  // Runs after the rewritten range move with the chain, in every copy of the text.
+  const laterKeys = new Set(plans.flatMap(({ target, plan }) => target.runKeys.slice(plan.endRun + 1)))
+  const chainExcluded = new Set([...excludedKeys].filter((key) => !laterKeys.has(key)))
   const shift = buildShiftEdits({
     analysis, block, blockRunKeys, excludedKeys: chainExcluded, oldEnd: primary.oldEnd, delta: primary.delta, codeBytesFor,
   })
@@ -914,7 +914,7 @@ async function resolveStyleFont(request, text, fontProvider) {
     const encoder = createStandardFontEncoder(standardFontFor(isStandardFamily(request.family) ? request.family : 'Helvetica', request.bold, request.italic))
     if (encoder.canEncode(visible)) return { encoder, match: 'exact', label: encoder.label, related: true }
   }
-  return resolveFallbackFont({ postscriptName: '', family: request.family, weight: request.weight, bold: request.bold, italic: request.italic, serif: request.serif, fixedPitch: request.fixedPitch }, visible, fontProvider)
+  return resolveFallbackFont({ postscriptName: '', family: request.family, weight: request.weight, bold: request.bold, italic: request.italic, serif: request.serif, fixedPitch: request.fixedPitch, sample: request.sample }, visible, fontProvider)
 }
 
 /** Rewrite a whole block in one operator with a new font/size/colour. */
@@ -1017,13 +1017,17 @@ export async function restyleNativeTextBlock(bytes, blockReference, style = {}, 
       italic: style.italic ?? font.italic,
       serif: font.serif,
       fixedPitch: font.fixedPitch,
+      // A style this font doesn't have comes from the font that looks most like it.
+      sample: familyChanged ? undefined : fontRequestFor(font).sample,
     }
     fallback = await resolveStyleFont(request, block.text, options.fontProvider)
     if (!fallback) throw new Error(`No installed font can draw this text in ${request.family}${request.bold ? ' bold' : ''}${request.italic ? ' italic' : ''}. Allow font access in Chrome or Edge, or pick another font.`)
     // Bold or italic must never swap a distinctive font for an unrelated one.
-    if (!familyChanged && !fallback.related) {
+    if (!familyChanged && !fallback.related && !fallback.closest) {
       throw new Error(`${request.family} has no such style on this computer, so it stayed the same.`)
     }
+    // A font the user picked may not have this weight; its nearest one is what they asked for.
+    if (familyChanged && fallback.sameFamily) fallback = { ...fallback, match: 'exact' }
     if (fallback.match !== 'exact') warnings.push(`Used ${fallback.label} — ${request.family}${request.bold ? ' Bold' : ''}${request.italic ? ' Italic' : ''} is not available here.`)
   }
   const scaleRatio = Math.abs(block.fontSize) ? block.fontSizeUser / Math.abs(block.fontSize) : 1

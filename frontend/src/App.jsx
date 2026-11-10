@@ -14,7 +14,9 @@ import { PdfPageThumbnail } from './features/pdf-viewer/PdfPageThumbnail.jsx'
 import { PdfPageViewer } from './features/pdf-viewer/PdfPageViewer.jsx'
 import { searchPdfDocument } from './features/pdf-viewer/searchPdfDocument.js'
 import { editPageImage, inspectNativePdfText, restyleNativeTextBlock } from './services/nativePdfTextEditor.js'
-import { createLocalFontProvider } from './engine/font-engine/fallbackFonts.js'
+import { addUploadedFont, createAppFontProvider, declareFreeFontFaces, listUploadedFonts } from './features/editor/fontServices.js'
+import { FREE_FONT_FAMILIES } from './engine/font-engine/fontLibrary.js'
+import { glyphShapes } from './engine/font-engine/previewFonts.js'
 import { normalizeFontKey, weightFromStyle } from './engine/font-engine/pdfFontLoader.js'
 import { findBlockNearPoint } from './features/text-editor/blockGeometry.js'
 import { HomeWorkspace, SplitWorkspace, OrganizeWorkspace } from './features/page-manager/WorkspacePanels.jsx'
@@ -33,6 +35,7 @@ import { fitTextObject, setMeasureFontProvider, subscribeFontLoads } from './fea
 import { importImageFile } from './features/editor/imageImport.js'
 import { prepareImageTextEdit, readTextInArea } from './features/editor/imageText.js'
 import { SweetDialogHost, showDialog } from './components/SweetDialog.jsx'
+import { listRecentFiles, rememberRecentFile, removeRecentFile } from './features/editor/recentFiles.js'
 import { clearSavedSession, loadSavedSession, saveSessionContent, saveSessionView } from './features/editor/sessionStore.js'
 import './studio.css'
 import './features/editor/editor.css'
@@ -159,7 +162,7 @@ function App() {
   const openSequenceRef = useRef(0)
   const fontProviderRef = useRef(null)
   if (!fontProviderRef.current) {
-    fontProviderRef.current = createLocalFontProvider()
+    fontProviderRef.current = createAppFontProvider()
     setMeasureFontProvider(fontProviderRef.current)
   }
   const pendingActivationRef = useRef(null)
@@ -197,6 +200,11 @@ function App() {
   const [selectedImageKey, setSelectedImageKey] = useState(null)
   const [pdfBusy, setPdfBusy] = useState(false)
   const [recentFiles, setRecentFiles] = useState([])
+  const recentIdRef = useRef(null)
+  const refreshRecentFiles = useCallback(async () => {
+    setRecentFiles((await listRecentFiles()).map((item) => ({ ...item, sizeLabel: formatBytes(item.size) })))
+  }, [])
+  useEffect(() => { void refreshRecentFiles() }, [refreshRecentFiles])
   const [activeWorkspace, setActiveWorkspace] = useState('edit')
   const [splitFrom, setSplitFrom] = useState('1')
   const [splitTo, setSplitTo] = useState('1')
@@ -227,6 +235,8 @@ function App() {
   const [hintTool, setHintTool] = useState(null)
   const [localFamilies, setLocalFamilies] = useState([])
   const [localWeights, setLocalWeights] = useState(() => new Map())
+  const [uploadedFonts, setUploadedFonts] = useState([])
+  const fontFileInputRef = useRef(null)
   const [localFontStatus, setLocalFontStatus] = useState(fontProviderRef.current.status)
   const [fontVersion, bumpFontVersion] = useReducer((value) => value + 1, 0)
 
@@ -473,10 +483,8 @@ function App() {
       const inspection = await inspectNativePdfText(bytes, inspectionOptions()).catch((error) => ({ runs: [], error }))
       if (operationId !== openSequenceRef.current) return
       applyInspection(inspection)
-      setRecentFiles((previous) => [
-        { name: file.name, size: file.size, sizeLabel: formatBytes(file.size), file, handle, openedAt: new Date().toISOString() },
-        ...previous.filter((item) => item.name !== file.name),
-      ].slice(0, 10))
+      recentIdRef.current = await rememberRecentFile(file, handle)
+      void refreshRecentFiles()
       if (inspection.error) showToast('Opened. The text in this PDF can’t be edited, but you can add to it.', 'warning')
       else if (!inspection.blocks?.length) showToast('Opened. This looks scanned, so its text can’t be edited — you can still add to it.', 'warning')
       else if (found) showToast(`Opened. ${extracted.length} item${extracted.length === 1 ? '' : 's'} you added can be edited again.`)
@@ -494,6 +502,18 @@ function App() {
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
   }, [applyInspection, clearSelections, installDocumentCore, showToast])
+
+  /** Prefer the file on disk when the browser still allows it; otherwise the copy kept here. */
+  const openRecentFile = useCallback(async (item) => {
+    let file = item.file
+    try {
+      if (item.handle && (await item.handle.queryPermission?.({ mode: 'read' })) === 'granted') file = await item.handle.getFile()
+    } catch {
+      // Moved or deleted on disk: the copy kept here still opens.
+    }
+    if (file) void openPdf(file, item.handle || null)
+    else showToast('That file isn’t available any more. Please open it again.', 'error')
+  }, [openPdf, showToast])
 
   /** Open with the system file picker when available so Save can write back to the same file. */
   const openFromPicker = useCallback(async () => {
@@ -924,7 +944,7 @@ function App() {
 
   const fontToast = useCallback((plan, warnings = [], base) => {
     const fontAccess = fontProviderRef.current?.status
-    const message = plan?.kind !== 'fallback' || plan.match === 'exact'
+    const message = plan?.kind !== 'fallback' || plan.match === 'exact' || warnings.some((warning) => warning.startsWith('Used '))
       ? base
       : plan.letters?.length
         ? `${base} “${plan.letters.slice(0, 4).join(' ')}” isn’t in this font, so it uses ${plan.label}.`
@@ -935,7 +955,7 @@ function App() {
   }, [showToast])
 
   const commitBlockEdit = useCallback(async (block, text) => {
-    const fontProvider = fontProviderRef.current
+    const fontProvider = fontProviderRef.current.withShapes(() => glyphShapes(documentSessionRef.current, block))
     const supported = new Set(block.fontMetadata?.supportedCharacters || [])
     if ([...text].some((character) => !/\s/.test(character) && !supported.has(character)) && fontProvider?.supported) void fontProvider.prepare()
     await runPdfCommand(new ReplaceNativeTextBlockCommand(block, text, { fontProvider }), {
@@ -947,8 +967,9 @@ function App() {
   }, [fontToast, runPdfCommand])
 
   const restyleBlock = useCallback(async (block, style) => {
-    const fontProvider = fontProviderRef.current
-    if ((style.fontSource === 'local' || (style.fontFamily && !isStandardFamily(style.fontFamily)) || style.bold !== undefined || style.italic !== undefined || style.weight !== undefined) && fontProvider?.supported) void fontProvider.prepare()
+    const fontProvider = fontProviderRef.current.withShapes(() => glyphShapes(documentSessionRef.current, block))
+    const pickedFreeFont = FREE_FONT_FAMILIES.includes(style.fontFamily) || uploadedFonts.some((font) => font.family === style.fontFamily)
+    if (!pickedFreeFont && (style.fontSource === 'local' || (style.fontFamily && !isStandardFamily(style.fontFamily)) || style.bold !== undefined || style.italic !== undefined || style.weight !== undefined) && fontProvider?.supported) void fontProvider.prepare()
     const reference = { key: block.key, pageIndex: block.pageIndex, runKeys: [...block.runKeys], text: block.text }
     await runPdfCommand(new TransformPdfBytesCommand((bytes) => restyleNativeTextBlock(bytes, reference, style, { fontProvider }), { label: 'Change text style', pageIndex: block.pageIndex }), {
       onResult: (result) => {
@@ -956,7 +977,7 @@ function App() {
         fontToast(result.fontPlan, result.warnings, 'Style updated.')
       },
     })
-  }, [fontToast, runPdfCommand])
+  }, [fontToast, runPdfCommand, uploadedFonts])
 
   const editImage = useCallback(async (image, operation, label) => {
     await runPdfCommand(new TransformPdfBytesCommand((bytes) => editPageImage(bytes, image, operation, inspectionOptions()), { label, pageIndex: image.pageIndex }), {
@@ -1081,6 +1102,9 @@ function App() {
         fileHandleRef.current = handle
         if (handle.name && handle.name !== fileName) setFileName(handle.name)
         await core.markSaved()
+        // Reopening from Home must bring back what was just saved.
+        recentIdRef.current = await rememberRecentFile(new File([bytes], handle.name || fileName, { type: 'application/pdf' }), handle, recentIdRef.current)
+        void refreshRecentFiles()
         showToast([`Saved to ${handle.name || fileName}.`, ...warnings].join(' '), warnings.length ? 'warning' : '')
       } else {
         downloadPdf(bytes, fileName.toLowerCase().endsWith('.pdf') ? fileName : `${fileName}.pdf`)
@@ -1285,6 +1309,27 @@ function App() {
     setLocalWeights(weights)
   }, [showToast])
 
+  useEffect(() => { void listUploadedFonts().then(setUploadedFonts).catch(() => undefined) }, [])
+
+  // The free font list is only needed once a PDF is open.
+  useEffect(() => {
+    if (!documentSession) return
+    void fontProviderRef.current.prepareLibrary().then((rows) => { declareFreeFontFaces(rows); bumpFontVersion() }).catch(() => undefined)
+  }, [documentSession])
+
+  const uploadFont = useCallback(async (file) => {
+    if (!file) return
+    try {
+      const font = await addUploadedFont(file)
+      setUploadedFonts(await listUploadedFonts())
+      showToast(`${font.family} added.`)
+    } catch {
+      showToast('That file isn’t a font we can use.', 'error')
+    } finally {
+      if (fontFileInputRef.current) fontFileInputRef.current.value = ''
+    }
+  }, [showToast])
+
   // Font access stays allowed between visits, so the full list can load by itself.
   useEffect(() => {
     let active = true
@@ -1427,7 +1472,17 @@ function App() {
     supported: fontProviderRef.current?.supported,
     status: localFontStatus,
     onLoad: () => void loadLocalFonts(),
-    weightsFor: (family) => [...(localWeights.get(normalizeFontKey(family)) || [])],
+    uploaded: [...new Set(uploadedFonts.map((font) => font.family))].sort((a, b) => a.localeCompare(b)),
+    free: FREE_FONT_FAMILIES,
+    onUpload: () => fontFileInputRef.current?.click(),
+    weightsFor: (family) => {
+      const key = normalizeFontKey(family)
+      return [...new Set([
+        ...(localWeights.get(key) || []),
+        ...uploadedFonts.filter((font) => normalizeFontKey(font.family) === key).map((font) => weightFromStyle(font.style) ?? 400),
+        ...fontProviderRef.current.weightsFor(family),
+      ])]
+    },
   }
 
   const selectTool = (id) => {
@@ -1543,6 +1598,7 @@ function App() {
     <main className="app-shell">
       <input ref={fileInputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event) => void openPdf(event.target.files?.[0])} />
       <input ref={mergeInputRef} type="file" accept="application/pdf,.pdf" multiple hidden onChange={(event) => void mergePdfs(Array.from(event.target.files || []))} />
+      <input ref={fontFileInputRef} type="file" accept=".ttf,.otf,font/ttf,font/otf" hidden onChange={(event) => void uploadFont(event.target.files?.[0])} />
       <input ref={imageInputRef} type="file" accept="image/*" hidden onChange={(event) => void handleImageFile(event.target.files?.[0])} />
 
       {isMobile && navOpen && <div className="backdrop" onClick={() => setNavOpen(false)} />}
@@ -1559,7 +1615,7 @@ function App() {
           })}
         </nav>
         <div className="rail-bottom">
-          <button type="button" className="rail-item" onClick={() => { setNavOpen(false); void openFromPicker() }}><FaUpload /><span>Open</span></button>
+          <button type="button" className="rail-item" onClick={() => { setNavOpen(false); void openFromPicker() }}><FaUpload /><span>Upload</span></button>
         </div>
       </aside>
 
@@ -1626,7 +1682,8 @@ function App() {
               onOpenPdf={() => void openFromPicker()}
               onMerge={() => mergeInputRef.current?.click()}
               recentFiles={recentFiles}
-              onOpenRecent={(item) => (item.file ? void openPdf(item.file, item.handle || null) : showToast('That file isn’t available any more. Please open it again.', 'error'))}
+              onOpenRecent={(item) => void openRecentFile(item)}
+              onRemoveRecent={(item) => void removeRecentFile(item.id).then(refreshRecentFiles)}
             />
           ) : activeWorkspace === 'split' ? (
             <SplitWorkspace pageCount={pageCount} fileName={fileName} fromPage={splitFrom} toPage={splitTo} setFromPage={setSplitFrom} setToPage={setSplitTo} onSplit={() => void splitPdf()} processing={processing} onOpenPdf={() => void openFromPicker()} />

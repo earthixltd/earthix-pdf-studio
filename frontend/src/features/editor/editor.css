@@ -18,7 +18,7 @@
 .selection-frame.type-highlight, .selection-frame.type-note { border-style: dashed; }
 .selection-frame.is-locked { border-color: #b54708; border-style: dashed; }
 .frame-body { position: absolute; inset: 0; pointer-events: auto; cursor: move; touch-action: none; }
-.frame-handle { --s: var(--ui-scale, 1); position: absolute; width: calc(11px * var(--s)); height: calc(11px * var(--s)); margin: calc(-5.5px * var(--s)) 0 0 calc(-5.5px * var(--s)); border: calc(1.5px * var(--s)) solid var(--accent); border-radius: 3px; background: #fff; pointer-events: auto; touch-action: none; }
+.frame-handle { --s: var(--ui-scale, 1); position: absolute; width: calc(11px * var(--s)); height: calc(11px * var(--s)); margin: calc(-5.5px * var(--s)) 0 0 calc(-5.5px * var(--s)); border: calc(1.5px * var(--s)) solid #fff; border-radius: 3px; outline: calc(1px * var(--s)) solid #1d4a57; background: #317d90; pointer-events: auto; touch-action: none; }
 .frame-handle::after { content: ''; position: absolute; inset: -9px; }
 .h-nw { top: 0; left: 0; cursor: nwse-resize; }
 .h-n { top: 0; left: 50%; cursor: ns-resize; }
@@ -29,13 +29,14 @@
 .h-sw { top: 100%; left: 0; cursor: nesw-resize; }
 .h-w { top: 50%; left: 0; cursor: ew-resize; }
 .type-text .h-e, .type-text .h-w { width: calc(7px * var(--s)); height: calc(18px * var(--s)); margin: calc(-9px * var(--s)) 0 0 calc(-3.5px * var(--s)); border-radius: 4px; }
-.frame-rotate { --s: var(--ui-scale, 1); position: absolute; top: calc(-30px * var(--s)); left: 50%; width: calc(16px * var(--s)); height: calc(16px * var(--s)); margin-left: calc(-8px * var(--s)); border: calc(1.5px * var(--s)) solid var(--accent); border-radius: 50%; background: #fff; pointer-events: auto; touch-action: none; cursor: grab; }
+.frame-rotate { --s: var(--ui-scale, 1); position: absolute; top: calc(-30px * var(--s)); left: 50%; width: calc(16px * var(--s)); height: calc(16px * var(--s)); margin-left: calc(-8px * var(--s)); border: calc(1.5px * var(--s)) solid #fff; border-radius: 50%; outline: calc(1px * var(--s)) solid #1d4a57; background: #317d90; pointer-events: auto; touch-action: none; cursor: grab; }
 .frame-rotate::before { content: ''; position: absolute; top: calc(14px * var(--s)); left: 50%; width: calc(1.5px * var(--s)); height: calc(14px * var(--s)); margin-left: calc(-.75px * var(--s)); background: var(--accent); }
 .frame-rotate::after { content: ''; position: absolute; inset: -8px; }
-.endpoint-handle { --s: var(--ui-scale, 1); position: absolute; z-index: 4; width: calc(13px * var(--s)); height: calc(13px * var(--s)); margin: calc(-6.5px * var(--s)) 0 0 calc(-6.5px * var(--s)); border: calc(2px * var(--s)) solid var(--accent); border-radius: 50%; background: #fff; pointer-events: auto; touch-action: none; cursor: crosshair; }
+.endpoint-handle { --s: var(--ui-scale, 1); position: absolute; z-index: 4; width: calc(13px * var(--s)); height: calc(13px * var(--s)); margin: calc(-6.5px * var(--s)) 0 0 calc(-6.5px * var(--s)); border: calc(1.5px * var(--s)) solid #fff; border-radius: 50%; outline: calc(1px * var(--s)) solid #1d4a57; background: #317d90; pointer-events: auto; touch-action: none; cursor: crosshair; }
 .object-drag-proxy { position: absolute; inset: 0; z-index: 2; overflow: visible; pointer-events: none; }
 .object-drag-proxy line { stroke: transparent; stroke-linecap: round; pointer-events: stroke; cursor: move; touch-action: none; }
 
+.note-message { position: absolute; z-index: 4; box-sizing: border-box; border: 1px solid rgb(0 0 0 / 18%); border-radius: 6px; font-family: Helvetica, Arial, sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; pointer-events: none; }
 .text-object-editor { text-rendering: geometricPrecision; position: absolute; z-index: 5; box-sizing: border-box; margin: 0; outline: 1.5px dashed var(--accent); outline-offset: 2px; pointer-events: auto; cursor: text; caret-color: var(--accent); overflow-wrap: break-word; user-select: text; -webkit-user-select: text; }
 .text-object-editor:empty::before { content: 'Type here'; color: #98a2b3; }
 

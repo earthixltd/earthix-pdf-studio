@@ -9,7 +9,7 @@ export async function openDocumentSession(input, {
   password,
   onProgress,
   signal,
-  pdfiumWaitMs = 4000,
+  pdfiumWaitMs = 1500,
 } = {}) {
   if (!pdfJsAdapter) {
     throw new PdfEngineError('The PDF.js adapter is required to create an Earthix document session.', {

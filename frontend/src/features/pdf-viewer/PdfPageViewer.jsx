@@ -4,6 +4,7 @@ import 'pdfjs-dist/web/pdf_viewer.css'
 import { FaFilePdf, FaSpinner } from 'react-icons/fa'
 import { calculatePdfZoom, clampPdfZoom } from './zoomMath.js'
 import { applySearchHighlights } from './applySearchHighlights.js'
+import { keepSelectionSteady } from './textSelection.js'
 import { InlineTextEditor } from '../text-editor/InlineTextEditor.jsx'
 import { viewportRect } from '../text-editor/blockGeometry.js'
 import { warmPreviewFonts } from '../../engine/font-engine/previewFonts.js'
@@ -95,6 +96,7 @@ export function PdfPageViewer({
     let pageProxy = null
     let selectionHandler = null
     let textLayerElement = null
+    let releaseSelection = null
     setRenderState('loading')
     setRenderError('')
     setTextMatchCount(0)
@@ -175,6 +177,7 @@ export function PdfPageViewer({
         await textLayer.render()
         if (cancelled) return
 
+        releaseSelection = keepSelectionSteady(textLayerElement)
         const matches = applySearchHighlights(textLayer, searchQueryRef.current, searchItemIndexesRef.current)
         setTextMatchCount(matches)
         selectionHandler = () => {
@@ -195,6 +198,7 @@ export function PdfPageViewer({
 
     return () => {
       cancelled = true
+      releaseSelection?.()
       if (selectionHandler && textLayerElement) textLayerElement.removeEventListener('mouseup', selectionHandler)
       textLayerRef.current = null
       textLayer?.cancel?.()

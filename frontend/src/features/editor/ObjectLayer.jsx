@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { TEXT_PADDING } from '../../engine/page-objects/textLayout.js'
+import { TEXT_PADDING, noteMessage } from '../../engine/page-objects/textLayout.js'
 import { ObjectView } from './ObjectView.jsx'
 import {
   applyBox, canRotate, inkBounds, isBoxObject, isLineShape, mergeLineRects, moveObject, newId, objectBounds, objectLabel,
@@ -128,6 +128,8 @@ export function ObjectLayer({
   const [creation, setCreation] = useState(null)
 
   const interactiveObjects = tool === 'select' || tool === 'edit'
+  // A comment's icon keeps a usable size even on a huge page viewed zoomed out.
+  const noteZoom = Math.max(1, 1 / scale)
   const creating = ['text', 'draw', 'shape', 'note', 'signature', 'whiteout'].includes(tool)
 
   const toView = useCallback((event) => {
@@ -207,8 +209,17 @@ export function ObjectLayer({
     window.addEventListener('pointercancel', up)
   }
 
+  // A click elsewhere finishes the text being typed, and that text is saved.
+  const finishTyping = () => {
+    if (!editingObject) return false
+    const active = document.activeElement
+    if (active?.classList?.contains('text-object-editor')) active.blur()
+    return true
+  }
+
   const onObjectPointerDown = (event, object) => {
     if (event.button !== 0 && event.pointerType === 'mouse') return
+    finishTyping()
     const now = Date.now()
     const isDoubleTap = lastTapRef.current.id === object.id && now - lastTapRef.current.time < 350 && event.pointerType !== 'mouse'
     lastTapRef.current = { id: object.id, time: now }
@@ -297,6 +308,7 @@ export function ObjectLayer({
   const onSurfacePointerDown = (event) => {
     if (event.button !== 0 && event.pointerType === 'mouse') return
     if (busy) return
+    if (finishTyping()) return
     const point = toView(event)
     if (tool === 'text') {
       event.preventDefault()
@@ -309,7 +321,7 @@ export function ObjectLayer({
     }
     if (tool === 'note') {
       event.preventDefault()
-      onCreate({ id: newId('note'), type: 'note', pageIndex, color: settings.note.color, text: '', x: point.x - 10, y: point.y - 10, width: 20, height: 20 }, 'Add comment')
+      onCreate({ id: newId('note'), type: 'note', pageIndex, color: settings.note.color, text: '', x: point.x - 10 * noteZoom, y: point.y - 10 * noteZoom, width: 20, height: 20 }, 'Add comment')
       return
     }
     if (tool === 'signature') {
@@ -383,7 +395,9 @@ export function ObjectLayer({
   // Render
   // ---------------------------------------------------------------------------
 
-  const frameBox = selected && !editingObject ? displayBox(selected) : null
+  const frameBox = selected && !editingObject
+    ? { ...displayBox(selected), ...(selected.type === 'note' ? { width: 20 * noteZoom, height: 20 * noteZoom } : {}) }
+    : null
   // Thin items (lines of text, rules) get fewer handles so they never pile up.
   const handles = handlesFor(selected).filter((handle) => {
     if (!frameBox) return true
@@ -397,6 +411,20 @@ export function ObjectLayer({
   const showRotate = selected && canRotate(selected) && !selected.locked
   const editing = editingObject && editingObject.pageIndex === pageIndex ? editingObject : null
 
+  // Clicking a comment's icon shows its message beside the icon, inside the page.
+  // It is sized for the screen, so it stays readable at any zoom.
+  const message = selected?.type === 'note' ? noteMessage(selected) : null
+  const messageScale = 1.15
+  let messageLeft = 0
+  let messageTop = 0
+  if (message) {
+    const iconLeft = selected.x * scale
+    const right = iconLeft + 20 * noteZoom * scale + 6
+    const width = message.width * messageScale
+    messageLeft = right + width <= pageWidth * scale ? right : Math.max(0, iconLeft - 6 - width)
+    messageTop = Math.max(0, Math.min(selected.y * scale, pageHeight * scale - message.height * messageScale))
+  }
+
   return (
     <div ref={rootRef} className={`object-layer ${creating ? 'is-creating' : ''} tool-${tool}`}>
       <svg className="object-svg" viewBox={`0 0 ${pageWidth} ${pageHeight}`} width={pageWidth * scale} height={pageHeight * scale} aria-hidden="true">
@@ -407,7 +435,7 @@ export function ObjectLayer({
             interactive={interactiveObjects && !busy && !object.imageTextPatch}
             version={fontVersion}
             hideText={editing?.id === object.id}
-            title={object.type === 'note' ? (object.text || 'Comment') : undefined}
+            noteZoom={noteZoom}
             onPointerDown={onObjectPointerDown}
             onDoubleClick={onObjectDoubleClick}
           />
@@ -450,6 +478,23 @@ export function ObjectLayer({
             <span className="frame-rotate" onPointerDown={onRotatePointerDown} title="Rotate (Shift snaps to 15°)" />
           )}
         </div>
+      )}
+
+      {message && (
+        <div
+          className="note-message"
+          style={{
+            left: `${messageLeft}px`,
+            top: `${messageTop}px`,
+            width: `${message.width * messageScale}px`,
+            minHeight: `${message.height * messageScale}px`,
+            padding: `${message.padding * messageScale}px`,
+            fontSize: `${message.fontSize * messageScale}px`,
+            lineHeight: message.lineHeight,
+            color: message.color,
+            background: message.background,
+          }}
+        >{message.text}</div>
       )}
 
       {selected && isLineShape(selected) && interactiveObjects && !selected.locked && selected.points.map((point, index) => (

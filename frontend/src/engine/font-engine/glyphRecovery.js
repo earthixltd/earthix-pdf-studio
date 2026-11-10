@@ -55,7 +55,7 @@ function* candidateGroups(letters) {
 }
 
 async function findInstalledFont(font, fontProvider) {
-  const entries = await fontProvider.listFonts().catch(() => [])
+  const entries = (await fontProvider.listFonts().catch(() => [])).filter((entry) => entry.source !== 'library')
   const wanted = normalizeFontKey(font.postscriptName)
   const family = normalizeFontKey(font.family)
   return entries.find((entry) => normalizeFontKey(entry.postscriptName) === wanted) ||

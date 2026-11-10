@@ -150,6 +150,8 @@ export function InlineTextEditor({ session, block, viewport, canvas, clickPoint,
     onDraftChange?.(readText(elementRef.current))
   }
 
+  // A copy printed slightly off to the side thickens the letters; an exact copy does not.
+  const fakeBold = block.twinBlocks?.some((twin) => Math.abs(twin.startPoint.x - block.startPoint.x) + Math.abs(twin.startPoint.y - block.startPoint.y) > 0.01)
   const style = {
     left: `${geometry.origin.x}px`,
     top: `${geometry.origin.y}px`,
@@ -160,7 +162,7 @@ export function InlineTextEditor({ session, block, viewport, canvas, clickPoint,
     fontSize: `${geometry.fontPx}px`,
     // The PDF's own font already carries its weight and slant, so the browser must not add more.
     fontFamily: previewFamily ? `"${previewFamily}", ${block.cssFontStack}` : block.cssFontStack,
-    fontWeight: previewFamily ? (block.twinKeys?.length ? 700 : 400) : block.fontWeight,
+    fontWeight: previewFamily ? (fakeBold ? 700 : 400) : block.fontWeight,
     fontStyle: previewFamily ? 'normal' : block.fontStyle,
     letterSpacing: geometry.letterSpacingPx ? `${geometry.letterSpacingPx}px` : undefined,
     color: block.fillColor || '#000000',

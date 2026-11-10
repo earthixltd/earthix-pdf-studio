@@ -39,6 +39,11 @@ original graphics state.
   and everything else stays in the original font. Indic text needs shaping, so it is still redrawn as a whole block.
 * While typing, the inline editor uses the PDF's own embedded font. PDF.js converts every embedded type to a browser
   font; `engine/font-engine/previewFonts.js` rebuilds its character map so real letters reach the right glyphs.
+* Fonts come from, in order: files the user added, fonts on this computer, the free library (`engine/font-engine/fontLibrary.js`,
+  about 2,000 fonts listed in `public/fonts/catalog.json`, downloaded from jsDelivr only when needed). A font with the same name
+  is used for the whole line. Otherwise the closest library font is chosen by comparing letter widths and shapes with the
+  PDF's own letters, and only the missing letters use it. Offline, the older installed and standard fallbacks still apply.
+  Rebuild the catalog with `npm run fonts:catalog`.
 * Weights are numeric (100–900), read from the font name, then `/FontWeight`. Bold, italic or weight changes never swap
   a distinctive font for an unrelated one: if that style isn't installed, the text stays as it was.
 * The rewritten operator keeps its original pen advance; text that followed it on the same line is moved by exactly the

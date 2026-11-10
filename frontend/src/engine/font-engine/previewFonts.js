@@ -8,6 +8,7 @@
 
 import { openFontProgram } from './fontEmbedder.js'
 import { normalizeFontKey } from './pdfFontLoader.js'
+import { glyphShape } from './fontLibrary.js'
 
 const writer = (length) => {
   const view = new DataView(new ArrayBuffer(length))
@@ -221,6 +222,22 @@ export async function previewFontFamily(session, block) {
   const family = best && best.covered * 2 >= best.total ? await registerFace(best.bytes) : null
   knownFamilies.set(metadata, family)
   return family
+}
+
+/** The shape of each letter the block's font has, to find a font that looks like it. */
+export async function glyphShapes(session, block) {
+  const metadata = block?.fontMetadata
+  if (!metadata?.isEmbedded || !metadata.codeMap?.length || !session?.getPageFonts) return null
+  const [font] = matchingFonts(await pageFonts(session, block.pageIndex), metadata)
+  if (!font) return null
+  const program = await openFontProgram(font.data)
+  const shapes = new Map()
+  for (const [letter, code] of metadata.codeMap) {
+    const glyph = program.glyphForCodePoint(fontCharOf(font.toFontChar, code))
+    const shape = glyph?.id ? glyphShape(glyph, program.unitsPerEm) : null
+    if (shape) shapes.set(letter, shape)
+  }
+  return shapes.size ? shapes : null
 }
 
 /** Get a page's fonts ready ahead of the first click. */

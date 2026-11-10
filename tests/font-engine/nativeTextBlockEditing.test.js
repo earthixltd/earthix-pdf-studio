@@ -198,3 +198,22 @@ test('table cells: text in the next cell does not move when a cell grows', async
   assert.ok(Math.abs(runStartX(result.inspection, '1') - runStartX(before, '1')) < 0.01, 'next cell unchanged')
   assert.ok(result.warnings.some((warning) => /table border|next column/.test(warning)), 'overflow is reported')
 })
+
+test('a word drawn several times over joins up and every copy is edited', async () => {
+  const copy = '/F1 40 Tf 1 0 0 1 72 700 Tm (WWW) Tj 113.4 0 Td (.ART) Tj 91.2 0 Td (HIN) Tj'
+  const content = `BT ${copy} ET q 0 0 1 rg BT ${copy} ET Q BT ${copy} ET`
+  const bytes = createRawPdf(content)
+  const before = await inspectNativePdfText(bytes)
+  assert.equal(before.blocks.length, 1, 'one editable line instead of tangled pieces')
+  const [block] = before.blocks
+  assert.equal(block.text.replace(/\s+/g, ''), 'WWW.ARTHIN')
+  assert.equal(block.twinKeys.length, 2)
+  const edited = block.text.replace('ART', 'ARRT')
+  const result = await replaceNativeTextBlock(bytes, block, edited)
+  assert.equal(result.inspection.blocks.length, 1)
+  assert.equal(result.inspection.blocks[0].twinKeys.length, 2, 'all three copies stay together')
+  assert.equal(result.inspection.blocks[0].text, edited)
+  const starts = result.inspection.runs.filter((run) => run.originalText === 'HIN').map((run) => run.startPoint.x)
+  assert.equal(starts.length, 3)
+  assert.ok(Math.max(...starts) - Math.min(...starts) < 0.01, 'later letters moved the same in every copy')
+})

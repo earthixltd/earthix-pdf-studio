@@ -12,7 +12,7 @@
   --text: #1d2a33;
   --text-2: #4d5c67;
   --text-3: #7b8892;
-  --accent: var(--accent);
+  --accent: #317d90;
   --accent-hover: #2a6c7e;
   --accent-soft: #e7f2f5;
   --accent-soft-2: #cfe5eb;
@@ -118,9 +118,9 @@ svg {
 }
 .rail-brand {
   display: block;
-  width: 56px;
+  width: 40px;
   height: auto;
-  margin: 2px 0 12px;
+  margin: 2px 0 10px;
 }
 .rail-nav {
   display: flex;
@@ -1440,11 +1440,17 @@ svg {
   background: var(--bg-app);
 }
 .workspace-home-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   width: 100%;
-  max-width: 1120px;
-  margin: 0 auto;
+  padding: 12px;
 }
 .workspace-hero {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
   padding: clamp(22px, 4vw, 40px);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
@@ -1574,7 +1580,9 @@ svg {
   font-size: 12px;
 }
 .workspace-recent-card {
-  margin-top: 14px;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
 }
 .workspace-section-heading h2 {
   margin: 0;
@@ -1603,6 +1611,23 @@ svg {
   background: transparent;
   text-align: left;
 }
+.workspace-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.workspace-recent-list .workspace-recent-remove {
+  flex: 0 0 32px;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.workspace-recent-list .workspace-recent-remove > svg {
+  color: var(--text-3);
+  font-size: 12px;
+}
 .workspace-recent-list button:hover {
   background: var(--surface-3);
 }
@@ -1628,6 +1653,9 @@ svg {
   font-size: 12px;
 }
 .workspace-empty-state {
+  display: grid;
+  flex: 1;
+  place-items: center;
   margin-top: 12px;
   padding: 22px;
   border: 1px dashed var(--border-strong);

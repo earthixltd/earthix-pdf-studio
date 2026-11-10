@@ -20,6 +20,7 @@
     "test": "node --test tests/engine/*.test.js tests/pdf-viewer/*.test.js tests/document-core/*.test.js tests/font-engine/*.test.js tests/page-manager.*.test.js tests/page-objects/*.test.js",
     "test:viewer": "node --test tests/pdf-viewer/*.test.js",
     "test:font-engine": "node --test tests/font-engine/*.test.js",
+    "fonts:catalog": "node scripts/build-font-catalog.mjs",
     "diagnose:pdf": "node frontend/scripts/diagnose-pdf-compatibility.js"
   },
   "engines": {

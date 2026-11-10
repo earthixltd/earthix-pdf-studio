@@ -35,7 +35,7 @@ function loadLocalFont(family, weight, italic) {
         .filter((item) => normalizeFontKey(item.family) === normalizeFontKey(family))
         .sort((a, b) => styleDistance(a.style, { weight, italic }) - styleDistance(b.style, { weight, italic }))
       if (!candidates.length) throw new Error('not installed')
-      entry.font = await openFontProgram(await candidates[0].load(), candidates[0].postscriptName)
+      entry.font = await openFontProgram(await candidates[0].load(''), candidates[0].postscriptName)
       entry.status = 'ready'
     } catch {
       entry.status = 'failed'

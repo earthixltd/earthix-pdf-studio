@@ -21,6 +21,43 @@ export function standardFontFor(family, bold, italic) {
   return standardFontName(isStandardFamily(family) ? family : 'Helvetica', bold, italic)
 }
 
+const NOTE_FONT_SIZE = 11
+const NOTE_MIN_WIDTH = 44
+const NOTE_MAX_WIDTH = 220
+const NOTE_PADDING = 5
+
+/** Dark or white, whichever reads better on the comment's colour. */
+function readableOn(hex) {
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex || '')
+  if (!match) return '#1B2333'
+  const value = parseInt(match[1], 16)
+  const brightness = (((value >> 16) & 255) * 299 + ((value >> 8) & 255) * 587 + (value & 255) * 114) / 1000
+  return brightness > 110 ? '#1B2333' : '#FFFFFF'
+}
+
+/**
+ * The message box of a comment, sized to its words. It appears when the
+ * comment's icon is clicked. Returns null for an empty comment.
+ */
+export function noteMessage(note) {
+  const text = String(note?.text ?? '').replace(/\s+$/, '')
+  if (!text.trim()) return null
+  const measure = (value) => createStandardMeasurer('Helvetica')(value, NOTE_FONT_SIZE)
+  const longest = Math.max(...text.split('\n').map(measure))
+  const width = Math.min(NOTE_MAX_WIDTH, Math.max(NOTE_MIN_WIDTH, Math.ceil(longest) + NOTE_PADDING * 2 + 2))
+  const layout = layoutText({ text, fontSize: NOTE_FONT_SIZE, lineHeight: 1.3, wrapWidth: width - NOTE_PADDING * 2, measure, metrics: familyMetrics('Helvetica') })
+  return {
+    text,
+    width,
+    height: layout.contentHeight + NOTE_PADDING * 2,
+    padding: NOTE_PADDING,
+    fontSize: NOTE_FONT_SIZE,
+    lineHeight: 1.3,
+    color: readableOn(note.color),
+    background: note.color || '#FDB022',
+  }
+}
+
 /** Numeric weight of a text object; older items only carry the bold flag. */
 export function textWeight(object) {
   return Number.isFinite(object?.weight) && object.weight > 0 ? object.weight : object?.bold ? 700 : 400
